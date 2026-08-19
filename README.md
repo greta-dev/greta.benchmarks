@@ -20,6 +20,17 @@ same comparison gets a new directory rather than overwriting an old one. A
 `NEWS.md` entry linking here has to keep pointing at the numbers it was written
 about.
 
+## The runs so far
+
+```
+2026-07-31-speed-and-ess/        speed and effective samples per second across
+                                 branches; predates the one-script-one-question
+                                 convention, so it is a harness plus numbered
+                                 experiments rather than a single run.R
+2026-08-05-keras3-vs-main/       does porting the optimisers to Keras 3 make
+                                 greta slower?
+```
+
 ## Running one
 
 ```bash
