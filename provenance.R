@@ -5,6 +5,19 @@
 # the moment it runs, so editing this file never changes what a past run
 # recorded. Analysis code does not have that property, which is why it stays
 # frozen inside its run directory.
+#
+# sessioninfo does the generic work - R version, OS, architecture, package
+# versions and where each package came from. What is left here is the part it
+# cannot reach, and which a benchmark cannot do without:
+#
+#   * the CPU model. sessioninfo reports "aarch64", not "Apple M3", and the
+#     difference is most of the timing.
+#   * the core count, which drives anything parallel.
+#   * git SHAs. Branch names are not the record: main moves.
+#
+# The resolved Python stack per branch is the fourth such thing, but it is
+# measured inside the run rather than here, and passed to write_results_md() as
+# `extra`.
 
 cpu_model <- function() {
   model <- switch(
@@ -29,21 +42,11 @@ cpu_model <- function() {
   model[1]
 }
 
-package_versions <- function(packages) {
-  versions <- vapply(
-    packages,
-    function(pkg) {
-      tryCatch(
-        as.character(utils::packageVersion(pkg)),
-        error = function(e) NA_character_
-      )
-    },
-    character(1)
-  )
-  versions
-}
-
 git_sha <- function(repo, rev) {
+  # expand here rather than trusting the caller: shQuote() puts the path in
+  # single quotes, where the shell will not expand a leading ~, and the failure
+  # is silent - the SHA column just reads NA
+  repo <- normalizePath(path.expand(repo), mustWork = FALSE)
   sha <- try(
     system2(
       "git",
@@ -72,28 +75,34 @@ host_provenance <- function(
 ) {
   list(
     run_at = format(Sys.time(), "%Y-%m-%d %H:%M:%S %Z"),
-    os = paste(Sys.info()[["sysname"]], Sys.info()[["release"]]),
-    arch = R.version$arch,
     cpu = cpu_model(),
     cores = parallel::detectCores(),
-    r_version = R.version.string,
-    packages = package_versions(packages)
+    platform = sessioninfo::platform_info(),
+    packages = sessioninfo::package_info(packages, dependencies = FALSE)
   )
 }
 
 format_provenance <- function(provenance, extra = NULL) {
+  platform <- provenance$platform
+  packages <- as.data.frame(provenance$packages)
+
   rows <- c(
     list(
       c("run at", provenance$run_at),
-      c("OS", provenance$os),
-      c("architecture", provenance$arch),
+      c("OS", platform$os),
+      c("system", platform$system),
       c("CPU", provenance$cpu),
       c("cores detected", as.character(provenance$cores)),
-      c("R", provenance$r_version)
+      c("R", platform$version)
     ),
     lapply(
-      names(provenance$packages),
-      function(pkg) c(paste("R package:", pkg), provenance$packages[[pkg]])
+      seq_len(nrow(packages)),
+      function(i) {
+        c(
+          paste("R package:", packages$package[i]),
+          paste0(packages$ondiskversion[i], " (", packages$source[i], ")")
+        )
+      }
     ),
     lapply(names(extra), function(key) c(key, extra[[key]]))
   )
