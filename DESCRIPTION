@@ -1,0 +1,24 @@
+Package: greta.benchmarks
+Title: Benchmarks for greta
+Version: 0.0.0.9000
+Authors@R:
+    person("Nicholas", "Tierney", , "nicholas.tierney@gmail.com",
+           role = c("aut", "cre"),
+           comment = c(ORCID = "0000-0003-1460-8722"))
+Description: Benchmark runs for greta, kept so that a speed claim in NEWS.md
+    or in a code comment can point at the code that produced it rather than at
+    a number somebody typed out. Not a package: this file exists so the
+    dependencies a run needs are declared in one place and can be installed
+    with pak::pak() or renv.
+License: MIT + file LICENSE
+Encoding: UTF-8
+Imports:
+    bench,
+    parallel,
+    reticulate,
+    sessioninfo,
+    tensorflow
+Remotes:
+    DavisVaughan/cross
+URL: https://github.com/njtierney/greta.benchmarks
+BugReports: https://github.com/njtierney/greta.benchmarks/issues
