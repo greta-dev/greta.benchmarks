@@ -8,11 +8,32 @@ rather than at a number somebody typed out.
 
 ```
 provenance.R                     environment capture, shared
-2026-08-05-keras3-vs-main/
-  run.R                          the exact script that produced these results
-  results.md                     the question, the numbers, the environment
+2026-08-20-warmup-trace/
+  01-measure.R                   the exact script that produced these numbers
+  02-report.R                    renders results.qmd
+  results.qmd                    the write-up; reads results.rds, computes
+                                 every number it quotes
+  results.md                     rendered output, the thing you link to
   results.rds                    raw output, so a summary can be recomputed
+  issue.md                       where a run is written up as a greta issue
 ```
+
+Two scripts, numbered, and neither calls the other. Measuring is expensive and
+sometimes installs package branches, so it is not something to trigger by
+accident when fixing a typo. Report second, as often as you like.
+
+**Prose that mentions a number computes it.** Use inline R rather than typing
+the figure into the text: a re-run changes the numbers, and hand-written ones
+silently stop matching the table above them.
+
+**Anything mutable gets captured at measure time**, not at report time. Git
+SHAs are the trap: branches move, so resolving one while rendering records a
+different commit than the one measured.
+
+**Link every SHA you record**, to
+`https://github.com/greta-dev/<repo>/commit/<sha>`, so a reader can click
+through to the commit rather than copy it into a terminal. Check the repo is
+public first — a link into a private repo is a dead end for everyone but you.
 
 One directory per run, named for its date and its question. A run directory is
 a lab notebook entry: once written it is never edited, and a later run of the
@@ -34,9 +55,19 @@ about.
 ## Running one
 
 ```bash
-cd 2026-08-05-keras3-vs-main
-Rscript --quiet --vanilla run.R
+Rscript --quiet --vanilla 2026-08-20-warmup-trace/01-measure.R
+Rscript --quiet --vanilla 2026-08-20-warmup-trace/02-report.R
 ```
+
+Run from the repository root: the scripts use `here()`, so they do not depend on
+the working directory.
+
+The two runs before `2026-08-19` predate this layout and keep a single `run.R`
+that both measures and writes its own `results.md`. They are left alone rather
+than converted, for the same reason a run directory is never edited: their git
+SHAs and Python stacks were resolved when the write-up was generated and are not
+stored in `results.rds`, so regenerating those files would record commits that
+were never measured.
 
 `GRETA_REPO` sets where the greta checkout lives, defaulting to
 `~/github/greta-dev/greta`. Runs that compare branches need those branches

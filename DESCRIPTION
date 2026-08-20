@@ -14,11 +14,22 @@ License: MIT + file LICENSE
 Encoding: UTF-8
 Imports:
     bench,
+    cross,
+    dplyr,
+    fs,
+    here,
+    knitr,
     parallel,
+    purrr,
+    quarto,
     reticulate,
+    rlang,
     sessioninfo,
-    tensorflow
+    tensorflow,
+    tibble,
+    tidyr,
+    withr
 Remotes:
     DavisVaughan/cross
-URL: https://github.com/njtierney/greta.benchmarks
-BugReports: https://github.com/njtierney/greta.benchmarks/issues
+URL: https://github.com/greta-dev/greta.benchmarks
+BugReports: https://github.com/greta-dev/greta.benchmarks/issues

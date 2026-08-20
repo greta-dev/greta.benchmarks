@@ -1,0 +1,165 @@
+---
+title: "The cost of greta's discarded warmup trace"
+format: gfm
+execute:
+  echo: false
+  warning: false
+  message: false
+---
+
+```{r}
+#| label: setup
+library(here)
+library(fs)
+library(bench)
+library(dplyr)
+library(tidyr)
+library(rlang)
+library(tibble)
+library(knitr)
+
+run_dir <- here("2026-08-20-warmup-trace")
+results_rds <- path(run_dir, "results.rds")
+if (!file_exists(results_rds)) {
+  stop("no results.rds - run 2026-08-20-warmup-trace/01-measure.R first", call. = FALSE)
+}
+results <- readRDS(results_rds)
+
+# refuse to render numbers that predate an edit to the script that produced
+# them. One input, compared by content, so this is not general cache
+# invalidation - just the one question worth asking.
+knitr::read_chunk(path(run_dir, "01-measure.R"))
+```
+
+## The question
+
+greta's warmup loop appends each burst's free state onto `traced_free_state`,
+then discards the whole thing when warmup ends. What does that cost, and does
+it grow faster than linearly?
+
+Wall time rather than effective samples per second, on purpose: the change this
+measures deletes work whose result is thrown away, so the sampler behaves
+identically and the draws are unchanged. ESS is a stochastic estimate and would
+only add variance. It is also unavailable as a clean comparison anyway, since
+`mcmc()` does not respect `set.seed()` ([greta
+#285](https://github.com/greta-dev/greta/issues/285),
+[#427](https://github.com/greta-dev/greta/issues/427)).
+
+## Part 1: how runtime scales with warmup
+
+Wall-clock seconds for `mcmc(n_samples = 100, chains = 2)`, single runs.
+
+```{r}
+#| label: scaling
+results$scaling |>
+  mutate(n_free = paste("n_free =", n_free)) |>
+  pivot_wider(names_from = n_free, values_from = elapsed) |>
+  arrange(warmup) |>
+  kable(digits = 2)
+```
+
+```{r}
+#| label: growth
+growth <- results$scaling |>
+  arrange(warmup) |>
+  summarise(fold = last(elapsed) / first(elapsed), .by = n_free)
+
+fold_at <- function(p) sprintf("%.1f", growth$fold[growth$n_free == p])
+```
+
+Warmup 500 to 4000 is an eight-fold increase in iterations. Over that range the
+time grows `r fold_at(1)`-fold at one free parameter, `r fold_at(20)`-fold at
+twenty, and `r fold_at(200)`-fold at 200. Only the largest model grows faster
+than its iteration count; the gap is the accumulation cost, and it appears only
+once a model has enough parameters for the copied matrix to be large.
+
+These are single runs, so read the shape across the row rather than any
+individual cell. The one- and twenty-parameter columns are the same model cost
+to within noise, and swap places between runs.
+
+## Part 2: the accumulation on its own
+
+greta removed, so the growth is attributable to `rbind` rather than to anything
+in the sampler. This is the accumulation the warmup loop performs:
+
+```{r accumulate}
+#| eval: false
+#| echo: true
+```
+
+Warmup breaks a burst roughly every three iterations once tuning changepoints
+are counted, so 167, 334 and 667 bursts stand in for warmups of about 500, 1000
+and 2000 iterations. At 200 free parameters:
+
+```{r}
+#| label: accumulation
+results$accumulation |>
+  select(bursts = n_bursts, median, allocated = mem_alloc) |>
+  mutate(across(c(median, allocated), format)) |>
+  kable(align = "r")
+```
+
+Doubling the burst count quadruples both time and memory; quadrupling it
+multiplies them by about sixteen. That is the signature of copying the whole
+accumulated matrix on every append. At 667 bursts — a warmup of roughly 2000
+iterations — greta allocates over a gigabyte for a matrix it then deletes.
+
+## Part 3: what removing it buys
+
+```{r}
+#| label: comparison
+#| output: asis
+if (is.null(results$comparison)) {
+  cat(
+    "**Not measured.** This needs a branch with the `self$trace()` call removed",
+    "from the warmup loop in `R/sampler_class.R`. Create it, then re-run",
+    "`01-measure.R` with `GRETA_FIX_BRANCH` set, then `02-report.R`.\n\n",
+    "An in-session check by patching the working tree gave 3.23s to 2.18s at",
+    "200 free parameters and warmup 2000, and 7.62s to 3.79s at warmup 4000.",
+    "That is recorded as motivation only: patching a working tree is not",
+    "reproducible by anyone else, which is the whole reason this directory",
+    "exists.\n"
+  )
+} else {
+  print(kable(as_tibble(results$comparison)))
+}
+```
+
+## Environment
+
+```{r}
+#| label: provenance
+# sessioninfo reports a GitHub source as "Github (owner/repo@sha)". Turn the
+# sha into a link so it can be clicked rather than copied.
+link_source <- function(source) {
+  sub(
+    "([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)@([0-9a-f]{7,40})",
+    "[\\1@\\2](https://github.com/\\1/commit/\\2)",
+    source
+  )
+}
+
+platform <- results$provenance$platform
+packages <- as_tibble(results$provenance$packages)
+
+bind_rows(
+  tibble(
+    item = c("run at", "OS", "system", "CPU", "cores detected", "R"),
+    value = c(
+      results$provenance$run_at,
+      platform$os,
+      platform$system,
+      results$provenance$cpu,
+      as.character(results$provenance$cores),
+      platform$version
+    )
+  ),
+  packages |>
+    transmute(
+      item = paste("R package:", package),
+      value = paste0(ondiskversion, " (", link_source(source), ")")
+    )
+) |>
+  set_names(c("", "")) |>
+  kable()
+```
