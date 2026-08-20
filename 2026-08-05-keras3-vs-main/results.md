@@ -32,7 +32,7 @@ Does porting greta's Keras optimisers to the Keras 3 API, and raising the pinned
 | R package: tensorflow | `2.20.0` |
 | stack, use-keras3-i633 | `python 3.12, tensorflow 2.21.0, tfp 0.25.0` |
 | stack, main | `python 3.11, tensorflow 2.15.1, tfp 0.23.0` |
-| greta, current | `769a9039d6c816779fa791b1922dda55f370e699` |
-| greta, reference | `9687542c361899b066ecd792557802e25343a59d` |
+| greta, current | [`769a9039d6c816779fa791b1922dda55f370e699`](https://github.com/greta-dev/greta/commit/769a9039d6c816779fa791b1922dda55f370e699) |
+| greta, reference | [`9687542c361899b066ecd792557802e25343a59d`](https://github.com/greta-dev/greta/commit/9687542c361899b066ecd792557802e25343a59d) |
 
 Timings are bound to this machine. Ratios within this run are meaningful; the absolute numbers are not comparable with a run on different hardware.

@@ -1,0 +1,131 @@
+---
+title: "Wiring `model(compile=)` through to `jit_compile`"
+format: gfm
+execute:
+  echo: false
+  warning: false
+  message: false
+---
+
+```{r}
+#| label: setup
+library(here)
+library(fs)
+library(bench)
+library(dplyr)
+library(tidyr)
+library(purrr)
+library(rlang)
+library(tibble)
+library(knitr)
+
+run_dir <- here("2026-08-19-jit-compile-vs-main")
+results_rds <- path(run_dir, "results.rds")
+if (!file_exists(results_rds)) {
+  stop("no results.rds - run 2026-08-19-jit-compile-vs-main/01-measure.R first", call. = FALSE)
+}
+results <- readRDS(results_rds)
+```
+
+## The question
+
+`model(compile = TRUE)` is documented as applying XLA JIT compilation but has
+been inert since January 2023. The `wire-jit-compile` branch passes it through
+at the two `tf_function()` sites in `dag_class.R`. Does that make greta faster?
+
+A ratio below 1 means the branch is faster. Both branches resolve their own
+Python stack, recorded below, so a ratio here is the effect of the wiring rather
+than of a version bump.
+
+The model is a plain regression on purpose: XLA cannot compile the gradients of
+`FillScaleTriL` or `CorrelationCholesky`, so anything using `wishart()`,
+`lkj_correlation()` or `cholesky_variable()` errors on the wired branch instead
+of producing a timing.
+
+## Results
+
+```{r}
+#| label: timings
+timings <- results$raw |>
+  mutate(timings = map(result, "timings")) |>
+  select(branch, timings) |>
+  unnest(timings) |>
+  mutate(task = as.character(expression))
+
+timings |>
+  select(task, branch, median) |>
+  pivot_wider(names_from = branch, values_from = median) |>
+  kable(digits = 4)
+```
+
+```{r}
+#| label: ratios
+timings |>
+  select(task, branch, median, min) |>
+  pivot_longer(c(median, min), names_to = "statistic") |>
+  pivot_wider(names_from = branch, values_from = value) |>
+  mutate(ratio = round(as.numeric(.data[[names(.)[3]]]) / as.numeric(.data[[names(.)[4]]]), 3)) |>
+  select(task, statistic, ratio) |>
+  pivot_wider(names_from = statistic, values_from = ratio) |>
+  kable()
+```
+
+`bench::mark()`. `min` is the statistic least contaminated by garbage collection
+and scheduling; where the two branches share byte-identical code, it is the one
+to read.
+
+## Environment
+
+```{r}
+#| label: provenance
+# sessioninfo reports a GitHub source as "Github (owner/repo@sha)". Turn the
+# sha into a link so it can be clicked rather than copied.
+link_source <- function(source) {
+  sub(
+    "([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)@([0-9a-f]{7,40})",
+    "[\\1@\\2](https://github.com/\\1/commit/\\2)",
+    source
+  )
+}
+
+platform <- results$provenance$platform
+packages <- as_tibble(results$provenance$packages)
+
+stacks <- results$raw |>
+  mutate(stack = map_chr(result, \(x) paste(
+    "python", x$stack[["python"]],
+    "| tensorflow", x$stack[["tensorflow"]],
+    "| tfp", x$stack[["tfp"]]
+  ))) |>
+  transmute(item = paste("stack,", branch), value = stack)
+
+bind_rows(
+  tibble(
+    item = c("run at", "OS", "system", "CPU", "cores detected", "R"),
+    value = c(
+      results$provenance$run_at,
+      platform$os,
+      platform$system,
+      results$provenance$cpu,
+      as.character(results$provenance$cores),
+      platform$version
+    )
+  ),
+  packages |>
+    transmute(
+      item = paste("R package:", package),
+      value = paste0(ondiskversion, " (", link_source(source), ")")
+    ),
+  stacks,
+  tibble(
+    item = paste("greta,", c("current", "reference")),
+    # linked so a reader can click through to the commit that was measured
+    value = sprintf(
+      "[`%s`](https://github.com/greta-dev/greta/commit/%s)",
+      unname(results$shas), unname(results$shas)
+    )
+  )
+) |>
+  set_names(c("", "")) |>
+  kable()
+```
