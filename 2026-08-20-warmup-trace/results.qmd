@@ -37,6 +37,9 @@ greta's warmup loop appends each burst's free state onto `traced_free_state`,
 then discards the whole thing when warmup ends. What does that cost, and does
 it grow faster than linearly?
 
+Written up as [greta #834](https://github.com/greta-dev/greta/issues/834); the
+issue text is in `issue.md` beside this file.
+
 Wall time rather than effective samples per second, on purpose: the change this
 measures deletes work whose result is thrown away, so the sampler behaves
 identically and the draws are unchanged. ESS is a stochastic estimate and would
