@@ -7,11 +7,15 @@ and nothing reads it in between.
 
 `rbind` copies everything accumulated so far on every append, so the cost grows
 with the square of the burst count. At 200 free parameters and a warmup of
-roughly 2000 iterations that is **over a gigabyte allocated for a matrix that is
-then deleted**.
+roughly 2000 iterations that is
+[**over a gigabyte allocated for a matrix that is then deleted**](https://github.com/greta-dev/greta.benchmarks/blob/main/2026-08-20-warmup-trace/results.md#part-2-the-accumulation-on-its-own).
 
 Numbers, and the code that produced them:
-[greta.benchmarks/2026-08-20-warmup-trace](https://github.com/greta-dev/greta.benchmarks/tree/main/2026-08-20-warmup-trace).
+[results.md](https://github.com/greta-dev/greta.benchmarks/blob/main/2026-08-20-warmup-trace/results.md), from [`01-measure.R`](https://github.com/greta-dev/greta.benchmarks/blob/main/2026-08-20-warmup-trace/01-measure.R). How
+runtime grows with warmup is
+[part 1](https://github.com/greta-dev/greta.benchmarks/blob/main/2026-08-20-warmup-trace/results.md#part-1-how-runtime-scales-with-warmup); what removing
+the call buys is [part 3](https://github.com/greta-dev/greta.benchmarks/blob/main/2026-08-20-warmup-trace/results.md#part-3-what-removing-it-buys), which
+fills in once a branch carrying the deletion exists.
 
 ## Why it is there
 
