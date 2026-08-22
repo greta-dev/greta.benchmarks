@@ -1,0 +1,117 @@
+---
+title: "What driving the optimiser loop from R costs"
+format: gfm
+execute:
+  echo: false
+  warning: false
+  message: false
+---
+
+```{r}
+#| label: setup
+library(here)
+library(fs)
+library(bench)
+library(dplyr)
+library(tibble)
+library(rlang)
+library(knitr)
+
+run_dir <- here("2026-08-22-optimiser-r-loop")
+results_rds <- path(run_dir, "results.rds")
+if (!file_exists(results_rds)) {
+  stop("no results.rds - run 2026-08-22-optimiser-r-loop/01-measure.R first", call. = FALSE)
+}
+results <- readRDS(results_rds)
+knitr::read_chunk(path(run_dir, "01-measure.R"))
+
+med <- as.numeric(results$loop_cost$median)
+speedup <- med[1] / med[2]
+per_step_ms <- 1000 * (med[1] - med[2]) / results$n_steps
+opt_per_iter <- results$opt_scaling$per_iter_ms
+```
+
+## The question
+
+`tf_optimiser` and `tf_compat_optimiser` run a `while` loop in R, stepping into
+TensorFlow once per iteration. `tfp_optimiser` does not. What does the R-driven
+loop cost, and what would moving it into TF actually buy?
+
+## Part 1: `opt()` cost per iteration does not move with model size
+
+```{r}
+#| label: scaling
+results$opt_scaling |>
+  transmute(n_free, iterations, `per iteration (ms)` = round(per_iter_ms, 2)) |>
+  kable()
+```
+
+`r sprintf("%.2f", min(opt_per_iter))`–`r sprintf("%.2f", max(opt_per_iter))` ms
+per iteration across a 500-fold change in the number of free parameters. The
+per-iteration cost is therefore fixed overhead, not gradient work.
+
+## Part 2: the ceiling, on identical arithmetic
+
+greta removed. The same `r results$n_steps` gradient-descent steps, driven from
+R and driven inside TF, so the difference is the cost of crossing back into R:
+
+```{r loops}
+#| eval: false
+#| echo: true
+```
+
+```{r}
+#| label: loop-cost
+results$loop_cost |>
+  select(expression, min, median, `itr/sec`) |>
+  mutate(across(c(min, median), format)) |>
+  kable(align = "r")
+```
+
+Driving the loop inside TF is **`r sprintf("%.0f", speedup)`x** faster here,
+which puts the bare round trip at about **`r sprintf("%.3f", per_step_ms)` ms
+per step**.
+
+## What that means for the fix
+
+The round trip is real but it is *not* most of what `opt()` spends per
+iteration: `r sprintf("%.3f", per_step_ms)` ms of round trip against
+`r sprintf("%.2f", median(opt_per_iter))` ms per `opt()` iteration, so roughly
+`r sprintf("%.0f", 100 * per_step_ms / median(opt_per_iter))`% of it.
+
+The rest is greta's own loop body, which runs in R: the convergence check, the
+`$numpy()` conversion of the objective, and `check_numerical_overflow()`. So
+moving the `while` loop into TF only pays if the body moves with it. Wrapping
+the loop alone and leaving the body in R would recover the smaller share.
+
+## Environment
+
+```{r}
+#| label: provenance
+link_source <- function(source) {
+  sub(
+    "([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)@([0-9a-f]{7,40})",
+    "[\\1@\\2](https://github.com/\\1/commit/\\2)",
+    source
+  )
+}
+
+platform <- results$provenance$platform
+packages <- as_tibble(results$provenance$packages)
+
+bind_rows(
+  tibble(
+    item = c("run at", "OS", "system", "CPU", "cores detected", "R"),
+    value = c(
+      results$provenance$run_at, platform$os, platform$system,
+      results$provenance$cpu, as.character(results$provenance$cores),
+      platform$version
+    )
+  ),
+  packages |>
+    transmute(item = paste("R package:", package),
+              value = paste0(ondiskversion, " (", link_source(source), ")"))
+) |>
+  set_names(c("", "")) |>
+  kable()
+```
