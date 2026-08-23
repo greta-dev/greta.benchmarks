@@ -12,6 +12,7 @@ execute:
 library(here)
 library(fs)
 library(bench)
+library(ggplot2)
 library(dplyr)
 library(tibble)
 library(rlang)
@@ -37,18 +38,28 @@ opt_per_iter <- results$opt_scaling$per_iter_ms
 TensorFlow once per iteration. `tfp_optimiser` does not. What does the R-driven
 loop cost, and what would moving it into TF actually buy?
 
-## Part 1: `opt()` cost per iteration does not move with model size
+## Part 1: `opt()` has a large fixed cost per iteration
+
+Models taken from `inst/examples/`, which the `example_models` vignette renders,
+plus one scaled-up regression to give the gradient real work to do.
 
 ```{r}
 #| label: scaling
 results$opt_scaling |>
-  transmute(n_free, iterations, `per iteration (ms)` = round(per_iter_ms, 2)) |>
+  transmute(model, n_free, iterations,
+            `per iteration (ms)` = round(per_iter_ms, 2)) |>
   kable()
 ```
 
-`r sprintf("%.2f", min(opt_per_iter))`–`r sprintf("%.2f", max(opt_per_iter))` ms
-per iteration across a 500-fold change in the number of free parameters. The
-per-iteration cost is therefore fixed overhead, not gradient work.
+The floor is about `r sprintf("%.2f", min(opt_per_iter))` ms an iteration. A
+model doing a 2000x200 matrix multiply for every gradient reaches only
+`r sprintf("%.2f", max(opt_per_iter))` ms, so even there roughly
+`r sprintf("%.0f", 100 * min(opt_per_iter) / max(opt_per_iter))`% of the
+iteration is cost that does not come from the model.
+
+Parameter count is not what drives it: `hierarchical_linear` has 6 free
+parameters and costs more per iteration than `multiple_linear`'s 8, because the
+graph is more involved rather than larger.
 
 ## Part 2: the ceiling, on identical arithmetic
 
@@ -66,6 +77,26 @@ results$loop_cost |>
   select(expression, min, median, `itr/sec`) |>
   mutate(across(c(min, median), format)) |>
   kable(align = "r")
+```
+
+Relative, taking the fastest as 1:
+
+```{r}
+#| label: loop-relative
+summary(results$loop_cost, relative = TRUE) |>
+  select(expression, min, median, `itr/sec`) |>
+  mutate(across(where(is.numeric), \(x) round(x, 1))) |>
+  kable(align = "r")
+```
+
+```{r}
+#| label: fig-loop
+#| fig-cap: "Every iteration of both loops, log scale. The two clusters do not overlap: the TF-driven loop sits under 1 ms, the R-driven one above 10 ms."
+#| fig-height: 2.5
+#| fig-width: 7
+autoplot(results$loop_cost) +
+  labs(x = NULL, y = NULL) +
+  theme_minimal(base_size = 11)
 ```
 
 Driving the loop inside TF is **`r sprintf("%.0f", speedup)`x** faster here,

@@ -88,8 +88,11 @@ measured <- local({
           # the branches draw different numbers, so results cannot be compared
           check = FALSE,
           filter_gc = FALSE,
-          min_iterations = 10,
-          max_iterations = 20
+          # 10 iterations could not resolve this: the effect is tens of ms
+          # against a within-branch sd of about 47 ms, and two runs at n = 10
+          # gave 27 ms and 62 ms. mcmc_short is ~0.8 s, so 50 is still cheap
+          min_iterations = 50,
+          max_iterations = 60
         )
 
         tfp_version <- tryCatch(
@@ -105,13 +108,9 @@ measured <- local({
             tensorflow = as.character(tensorflow::tf$`__version__`),
             tfp = tfp_version
           ),
-          timings = timings[, c(
-            "expression",
-            "min",
-            "median",
-            "itr/sec",
-            "mem_alloc"
-          )]
+          # the whole bench_mark, not a subset: summary(relative = TRUE) and
+          # autoplot() both need the raw time and gc list-columns
+          timings = timings
         )
       },
       # both branches named explicitly, and current = FALSE: with the default

@@ -8,52 +8,64 @@ but has been inert since January 2023. The `wire-jit-compile` branch
 passes it through at the two `tf_function()` sites in `dag_class.R`.
 Does that make greta faster?
 
-A ratio below 1 means the branch is faster. Both branches resolve their
-own Python stack, recorded below, so a ratio here is the effect of the
-wiring rather than of a version bump.
+Both branches resolve their own Python stack, recorded below, so a
+difference here is the effect of the wiring rather than of a version
+bump.
 
 The model is a plain regression on purpose: XLA cannot compile the
-gradients of `FillScaleTriL` or `CorrelationCholesky`, so anything using
-`wishart()`, `lkj_correlation()` or `cholesky_variable()` errors on the
-wired branch instead of producing a timing.
+gradients of `FillScaleTriL` or `CorrelationCholesky`, so `wishart()`,
+`lkj_correlation()` and `cholesky_variable()` models error on the wired
+branch instead of producing a timing.
 
 ## Results
 
-| task       | wire-jit-compile |    main |
-|:-----------|-----------------:|--------:|
-| build      |             20ms |  20.2ms |
-| mcmc_short |            788ms | 850.3ms |
+| task | median_wire-jit-compile | median_main | itr/sec_wire-jit-compile | itr/sec_main |
+|---:|---:|---:|---:|---:|
+| build | 21.7ms | 21.4ms | 43.8 | 44.6 |
+| mcmc_short | 816.2ms | 857.8ms | 1.2 | 1.2 |
 
-| task       | median |   min |
-|:-----------|-------:|------:|
-| build      |  0.990 | 1.008 |
-| mcmc_short |  0.927 | 0.935 |
+Relative within each task, taking the faster branch as 1:
 
-`bench::mark()`. `min` is the statistic least contaminated by garbage
-collection and scheduling; where the two branches share byte-identical
-code, it is the one to read.
+|       task |           branch |   min | median |
+|-----------:|-----------------:|------:|-------:|
+|      build | wire-jit-compile | 1.000 |  1.004 |
+|      build |             main | 1.005 |  1.000 |
+| mcmc_short | wire-jit-compile | 1.000 |  1.000 |
+| mcmc_short |             main | 1.031 |  1.038 |
+
+<div id="fig-dist">
+
+![](results_files/figure-commonmark/fig-dist-1.png)
+
+Figure 1: Every iteration of the sampling task, both branches, log
+scale. The distributions overlap heavily - the difference is a shift in
+a wide, noisy spread, not a clean separation.
+
+</div>
 
 ## What this says
 
-Wiring `compile` through makes sampling about **7% faster** (0.927
-median, and the `min` ratio agrees, so this is not a garbage-collection
-artefact). Model definition is unchanged (0.990), which is what you
-would expect: XLA compiles at first call, not at definition.
+Sampling is **4.8% faster** on the wired branch: 816 ms against 858 ms,
+a difference of 42 ms.
 
-Both branches resolved the same Python stack, so this is the effect of
-the wiring rather than of a version difference.
+The spread is wide — a within-branch standard deviation of about 58 ms,
+comparable to the effect itself — so this needs 50 iterations per branch
+to see. A Welch test gives p = 0.0062, with a 95% interval on the
+difference of 9 to 55 ms. **An earlier run at 10 iterations per branch
+could not resolve it**, and gave estimates ranging from 27 ms to 62 ms;
+treat any single small run of this comparison as uninformative.
 
-The model is a plain regression on purpose. XLA cannot compile the
-gradients of `FillScaleTriL` or `CorrelationCholesky`, so `wishart()`,
-`lkj_correlation()` and `cholesky_variable()` models error on the wired
-branch instead of producing a timing. **7% is therefore the upside for
-the models XLA can handle, and says nothing about the ones it cannot.**
+Model definition is unchanged, which is what you would expect: XLA
+compiles at first call, not at definition.
+
+So the upside is real but modest, and it applies only to the models XLA
+can handle.
 
 ## Environment
 
 |  |  |
 |:---|:---|
-| run at | 2026-08-23 10:21:31 AEST |
+| run at | 2026-08-23 10:30:55 AEST |
 | OS | macOS Tahoe 26.5.2 |
 | system | aarch64, darwin23 |
 | CPU | Apple M3 |

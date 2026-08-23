@@ -12,11 +12,12 @@ execute:
 library(here)
 library(fs)
 library(bench)
+library(ggplot2)
 library(dplyr)
 library(tidyr)
 library(purrr)
-library(rlang)
 library(tibble)
+library(rlang)
 library(knitr)
 
 run_dir <- here("2026-08-19-jit-compile-vs-main")
@@ -25,140 +26,149 @@ if (!file_exists(results_rds)) {
   stop("no results.rds - run 2026-08-19-jit-compile-vs-main/01-measure.R first", call. = FALSE)
 }
 results <- readRDS(results_rds)
+
+branch_current <- results$raw$branch[[1]]
+branch_reference <- results$raw$branch[[2]]
+
+# one bench_mark carrying both branches, so bench's own summary() and
+# autoplot() can be used rather than hand-rolled ratios
+combined <- map2(results$raw$branch, results$raw$result, \(b, res) {
+  tb <- as_tibble(res$timings)
+  tb$branch <- b
+  tb
+}) |>
+  list_rbind() |>
+  as_bench_mark()
+
+# relative within a task, not across tasks: build and mcmc_short are different
+# work and normalising them together would say nothing
+relative_for <- function(task) {
+  sub <- combined[as.character(combined$expression) == task, ]
+  sub$expression <- sub$branch
+  summary(as_bench_mark(sub), relative = TRUE) |>
+    transmute(branch = as.character(expression), task = task,
+              min = round(min, 3), median = round(median, 3))
+}
 ```
 
 ## The question
 
 `model(compile = TRUE)` is documented as applying XLA JIT compilation but has
-been inert since January 2023. The `wire-jit-compile` branch passes it through
-at the two `tf_function()` sites in `dag_class.R`. Does that make greta faster?
+been inert since January 2023. The `wire-jit-compile` branch passes it through at
+the two `tf_function()` sites in `dag_class.R`. Does that make greta faster?
 
-A ratio below 1 means the branch is faster. Both branches resolve their own
-Python stack, recorded below, so a ratio here is the effect of the wiring rather
-than of a version bump.
+Both branches resolve their own Python stack, recorded below, so a difference
+here is the effect of the wiring rather than of a version bump.
 
 The model is a plain regression on purpose: XLA cannot compile the gradients of
-`FillScaleTriL` or `CorrelationCholesky`, so anything using `wishart()`,
-`lkj_correlation()` or `cholesky_variable()` errors on the wired branch instead
-of producing a timing.
+`FillScaleTriL` or `CorrelationCholesky`, so `wishart()`, `lkj_correlation()` and
+`cholesky_variable()` models error on the wired branch instead of producing a
+timing.
 
 ## Results
 
 ```{r}
-#| label: timings
-branch_current <- results$raw$branch[[1]]
-branch_reference <- results$raw$branch[[2]]
+#| label: absolute
+combined |>
+  as_tibble() |>
+  transmute(task = as.character(expression), branch,
+            median = format(median), `itr/sec` = round(`itr/sec`, 1)) |>
+  pivot_wider(names_from = branch, values_from = c(median, `itr/sec`)) |>
+  kable(align = "r")
+```
 
-timings <- results$raw |>
-  mutate(timings = map(result, "timings")) |>
-  select(branch, timings) |>
-  unnest(timings) |>
-  mutate(task = as.character(expression))
+Relative within each task, taking the faster branch as 1:
 
-timings |>
-  select(task, branch, median) |>
-  pivot_wider(names_from = branch, values_from = median) |>
-  kable(digits = 4)
+```{r}
+#| label: relative
+map(unique(as.character(combined$expression)), relative_for) |>
+  list_rbind() |>
+  select(task, branch, min, median) |>
+  kable(align = "r")
 ```
 
 ```{r}
-#| label: ratios
-ratios <- timings |>
-  mutate(across(c(median, min), as.numeric)) |>
-  select(task, branch, median, min) |>
-  pivot_longer(c(median, min), names_to = "statistic") |>
-  pivot_wider(names_from = branch, values_from = value) |>
-  mutate(ratio = .data[[branch_current]] / .data[[branch_reference]])
+#| label: fig-dist
+#| fig-cap: "Every iteration of the sampling task, both branches, log scale. The distributions overlap heavily - the difference is a shift in a wide, noisy spread, not a clean separation."
+#| fig-height: 2.5
+#| fig-width: 7
+mcmc_times <- map2(results$raw$branch, results$raw$result, \(b, res) {
+  i <- which(as.character(res$timings$expression) == "mcmc_short")
+  tibble(branch = b, seconds = as.numeric(res$timings$time[[i]]))
+}) |>
+  list_rbind()
 
-ratios |>
-  transmute(task, statistic, ratio = round(ratio, 3)) |>
-  pivot_wider(names_from = statistic, values_from = ratio) |>
-  kable()
+ggplot(mcmc_times, aes(x = seconds, y = branch)) +
+  geom_jitter(height = 0.15, alpha = 0.5, colour = "#F8766D") +
+  scale_x_continuous(labels = \(x) paste0(round(1000 * x), "ms")) +
+  labs(x = NULL, y = NULL) +
+  theme_minimal(base_size = 11)
 ```
-
-`bench::mark()`. `min` is the statistic least contaminated by garbage collection
-and scheduling; where the two branches share byte-identical code, it is the one
-to read.
 
 ## What this says
 
 ```{r}
 #| label: verdict
-mcmc_ratio <- ratios |>
-  filter(task == "mcmc_short", statistic == "median") |>
-  pull(ratio)
-build_ratio <- ratios |>
-  filter(task == "build", statistic == "median") |>
-  pull(ratio)
-pct <- round(100 * (1 - mcmc_ratio))
+w <- mcmc_times$seconds[mcmc_times$branch == branch_current] * 1000
+m <- mcmc_times$seconds[mcmc_times$branch == branch_reference] * 1000
+tt <- t.test(w, m)
+diff_ms <- median(m) - median(w)
+pct <- 100 * (1 - median(w) / median(m))
+ci <- sort(-tt$conf.int)
 ```
 
-Wiring `compile` through makes sampling about **`r pct`% faster**
-(`r sprintf("%.3f", mcmc_ratio)` median, and the `min` ratio agrees, so this is
-not a garbage-collection artefact). Model definition is unchanged
-(`r sprintf("%.3f", build_ratio)`), which is what you would expect: XLA compiles
-at first call, not at definition.
+Sampling is **`r sprintf("%.1f", pct)`% faster** on the wired branch:
+`r sprintf("%.0f", median(w))` ms against `r sprintf("%.0f", median(m))` ms,
+a difference of `r sprintf("%.0f", diff_ms)` ms.
 
-Both branches resolved the same Python stack, so this is the effect of the
-wiring rather than of a version difference.
+The spread is wide — a within-branch standard deviation of about
+`r sprintf("%.0f", sd(m))` ms, comparable to the effect itself — so this needs
+`r length(w)` iterations per branch to see. A Welch test gives
+p = `r signif(tt$p.value, 2)`, with a 95% interval on the difference of
+`r sprintf("%.0f", ci[1])` to `r sprintf("%.0f", ci[2])` ms. **An earlier run at
+10 iterations per branch could not resolve it**, and gave estimates ranging from
+27 ms to 62 ms; treat any single small run of this comparison as uninformative.
 
-The model is a plain regression on purpose. XLA cannot compile the gradients of
-`FillScaleTriL` or `CorrelationCholesky`, so `wishart()`, `lkj_correlation()`
-and `cholesky_variable()` models error on the wired branch instead of producing
-a timing. **`r pct`% is therefore the upside for the models XLA can handle, and
-says nothing about the ones it cannot.**
+Model definition is unchanged, which is what you would expect: XLA compiles at
+first call, not at definition.
+
+So the upside is real but modest, and it applies only to the models XLA can
+handle.
 
 ## Environment
 
 ```{r}
 #| label: provenance
-# sessioninfo reports a GitHub source as "Github (owner/repo@sha)". Turn the
-# sha into a link so it can be clicked rather than copied.
 link_source <- function(source) {
-  sub(
-    "([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)@([0-9a-f]{7,40})",
-    "[\\1@\\2](https://github.com/\\1/commit/\\2)",
-    source
-  )
+  sub("([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)@([0-9a-f]{7,40})",
+      "[\\1@\\2](https://github.com/\\1/commit/\\2)", source)
 }
 
 platform <- results$provenance$platform
 packages <- as_tibble(results$provenance$packages)
 
-stacks <- results$raw |>
-  mutate(stack = map_chr(result, \(x) paste(
-    "python", x$stack[["python"]],
-    "| tensorflow", x$stack[["tensorflow"]],
-    "| tfp", x$stack[["tfp"]]
-  ))) |>
-  transmute(item = paste("stack,", branch), value = stack)
+stacks <- map2(results$raw$branch, results$raw$result, \(b, res) {
+  tibble(item = paste("stack,", b),
+         value = paste("python", res$stack[["python"]],
+                       "| tensorflow", res$stack[["tensorflow"]],
+                       "| tfp", res$stack[["tfp"]]))
+}) |>
+  list_rbind()
 
 bind_rows(
   tibble(
     item = c("run at", "OS", "system", "CPU", "cores detected", "R"),
-    value = c(
-      results$provenance$run_at,
-      platform$os,
-      platform$system,
-      results$provenance$cpu,
-      as.character(results$provenance$cores),
-      platform$version
-    )
+    value = c(results$provenance$run_at, platform$os, platform$system,
+              results$provenance$cpu, as.character(results$provenance$cores),
+              platform$version)
   ),
   packages |>
-    transmute(
-      item = paste("R package:", package),
-      value = paste0(ondiskversion, " (", link_source(source), ")")
-    ),
+    transmute(item = paste("R package:", package),
+              value = paste0(ondiskversion, " (", link_source(source), ")")),
   stacks,
-  tibble(
-    item = paste("greta,", c("current", "reference")),
-    # linked so a reader can click through to the commit that was measured
-    value = sprintf(
-      "[`%s`](https://github.com/greta-dev/greta/commit/%s)",
-      unname(results$shas), unname(results$shas)
-    )
-  )
+  tibble(item = paste("greta,", c("current", "reference")),
+         value = sprintf("[`%s`](https://github.com/greta-dev/greta/commit/%s)",
+                         unname(results$shas), unname(results$shas)))
 ) |>
   set_names(c("", "")) |>
   kable()
