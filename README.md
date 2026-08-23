@@ -41,6 +41,12 @@ same comparison gets a new directory rather than overwriting an old one. A
 `NEWS.md` entry linking here has to keep pointing at the numbers it was written
 about.
 
+## The standing suite
+
+`suite/` is a fixed model set and task list, run across two branches with
+{cross}. Use it to check a change before opening a pull request; use a dated run
+directory to answer a one-off question. See `suite/README.md`.
+
 ## The runs so far
 
 ```
