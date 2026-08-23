@@ -115,7 +115,11 @@ measured <- local({
           )]
         )
       },
-      branches = branch_reference
+      # both branches named explicitly, and current = FALSE: with the default
+      # cross measures whatever happens to be checked out and this script would
+      # label it branch_current, which is silently wrong
+      current = FALSE,
+      branches = c(branch_current, branch_reference)
     )
   )
   # SHAs captured here, not at report time: branches move, so resolving them
