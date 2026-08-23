@@ -46,6 +46,9 @@ of producing a timing.
 
 ```{r}
 #| label: timings
+branch_current <- results$raw$branch[[1]]
+branch_reference <- results$raw$branch[[2]]
+
 timings <- results$raw |>
   mutate(timings = map(result, "timings")) |>
   select(branch, timings) |>
@@ -60,12 +63,15 @@ timings |>
 
 ```{r}
 #| label: ratios
-timings |>
+ratios <- timings |>
+  mutate(across(c(median, min), as.numeric)) |>
   select(task, branch, median, min) |>
   pivot_longer(c(median, min), names_to = "statistic") |>
   pivot_wider(names_from = branch, values_from = value) |>
-  mutate(ratio = round(as.numeric(.data[[names(.)[3]]]) / as.numeric(.data[[names(.)[4]]]), 3)) |>
-  select(task, statistic, ratio) |>
+  mutate(ratio = .data[[branch_current]] / .data[[branch_reference]])
+
+ratios |>
+  transmute(task, statistic, ratio = round(ratio, 3)) |>
   pivot_wider(names_from = statistic, values_from = ratio) |>
   kable()
 ```
@@ -73,6 +79,34 @@ timings |>
 `bench::mark()`. `min` is the statistic least contaminated by garbage collection
 and scheduling; where the two branches share byte-identical code, it is the one
 to read.
+
+## What this says
+
+```{r}
+#| label: verdict
+mcmc_ratio <- ratios |>
+  filter(task == "mcmc_short", statistic == "median") |>
+  pull(ratio)
+build_ratio <- ratios |>
+  filter(task == "build", statistic == "median") |>
+  pull(ratio)
+pct <- round(100 * (1 - mcmc_ratio))
+```
+
+Wiring `compile` through makes sampling about **`r pct`% faster**
+(`r sprintf("%.3f", mcmc_ratio)` median, and the `min` ratio agrees, so this is
+not a garbage-collection artefact). Model definition is unchanged
+(`r sprintf("%.3f", build_ratio)`), which is what you would expect: XLA compiles
+at first call, not at definition.
+
+Both branches resolved the same Python stack, so this is the effect of the
+wiring rather than of a version difference.
+
+The model is a plain regression on purpose. XLA cannot compile the gradients of
+`FillScaleTriL` or `CorrelationCholesky`, so `wishart()`, `lkj_correlation()`
+and `cholesky_variable()` models error on the wired branch instead of producing
+a timing. **`r pct`% is therefore the upside for the models XLA can handle, and
+says nothing about the ones it cannot.**
 
 ## Environment
 

@@ -24,7 +24,7 @@ if (!file_exists(results_rds)) {
 }
 results <- readRDS(results_rds)
 knitr::read_chunk(path(run_dir, "01-measure.R"))
-
+summary(results$loop_cost, relative = TRUE)
 med <- as.numeric(results$loop_cost$median)
 speedup <- med[1] / med[2]
 per_step_ms <- 1000 * (med[1] - med[2]) / results$n_steps

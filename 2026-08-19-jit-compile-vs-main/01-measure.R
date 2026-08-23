@@ -75,7 +75,6 @@ measured <- local({
           chains = 1,
           verbose = FALSE
         ))
-        invisible(calculate(mod$dag$target_nodes[[1]], nsim = 1))
 
         timings <- bench::mark(
           build = build_model(),
