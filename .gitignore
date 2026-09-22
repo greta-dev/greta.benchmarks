@@ -4,3 +4,6 @@
 .DS_Store
 .httr-oauth
 .quarto
+_targets/
+report.html
+report_files/
