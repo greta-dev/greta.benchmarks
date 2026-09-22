@@ -1,0 +1,1778 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="en" xml:lang="en"><head>
+
+<meta charset="utf-8">
+<meta name="generator" content="quarto-1.9.36">
+
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
+
+
+<title>MCMC suite: data nodes as tf$Variable</title>
+<style>
+/* Default styles provided by pandoc.
+** See https://pandoc.org/MANUAL.html#variables-for-html for config info.
+*/
+code{white-space: pre-wrap;}
+span.smallcaps{font-variant: small-caps;}
+div.columns{display: flex; gap: min(4vw, 1.5em);}
+div.column{flex: auto; overflow-x: auto;}
+div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+ul.task-list{list-style: none;}
+ul.task-list li input[type="checkbox"] {
+  width: 0.8em;
+  margin: 0 0.8em 0.2em -1em; /* quarto-specific, see https://github.com/quarto-dev/quarto-cli/issues/4556 */ 
+  vertical-align: middle;
+}
+</style>
+
+
+<script src="results_files/libs/clipboard/clipboard.min.js"></script>
+<script src="results_files/libs/quarto-html/quarto.js" type="module"></script>
+<script src="results_files/libs/quarto-html/tabsets/tabsets.js" type="module"></script>
+<script src="results_files/libs/quarto-html/popper.min.js"></script>
+<script src="results_files/libs/quarto-html/tippy.umd.min.js"></script>
+<script src="results_files/libs/quarto-html/anchor.min.js"></script>
+<link href="results_files/libs/quarto-html/tippy.css" rel="stylesheet">
+<link href="results_files/libs/quarto-html/quarto-syntax-highlighting-845c23b38eaddc0f92fda52bfe77a8c8.css" rel="stylesheet" id="quarto-text-highlighting-styles">
+<script src="results_files/libs/bootstrap/bootstrap.min.js"></script>
+<link href="results_files/libs/bootstrap/bootstrap-icons.css" rel="stylesheet">
+<link href="results_files/libs/bootstrap/bootstrap-138a6193a3bd40baf1e627da441a4734.min.css" rel="stylesheet" append-hash="true" id="quarto-bootstrap" data-mode="light">
+
+
+</head>
+
+<body class="fullcontent quarto-light">
+
+<div id="quarto-content" class="page-columns page-rows-contents page-layout-article">
+
+<main class="content" id="quarto-document-content">
+
+<header id="title-block-header" class="quarto-title-block default">
+<div class="quarto-title">
+<h1 class="title">MCMC suite: data nodes as tf$Variable</h1>
+</div>
+
+
+
+<div class="quarto-title-meta">
+
+    
+  
+    
+  </div>
+  
+
+
+</header>
+
+
+<p>4 chains, 1000 warmup, 1000 samples, 5 replicates per model; 20 iterations for the deterministic tier. These are greta’s own defaults for <code>sampler</code>, <code>n_samples</code> and <code>warmup</code>, so this is what a user gets without asking for anything.</p>
+<div class="cell">
+<div class="cell-output-display">
+<table class="caption-top table table-sm table-striped small">
+<thead>
+<tr class="header">
+<th style="text-align: left;">role</th>
+<th style="text-align: left;">branch</th>
+<th style="text-align: left;">sha</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td style="text-align: left;">reference</td>
+<td style="text-align: left;">main</td>
+<td style="text-align: left;">280dc9068b</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">under test</td>
+<td style="text-align: left;">data-interface-into-log-prob-739</td>
+<td style="text-align: left;">7875a3799d</td>
+</tr>
+</tbody>
+</table>
+</div>
+</div>
+<section id="what-is-being-measured" class="level2">
+<h2 class="anchored" data-anchor-id="what-is-being-measured">What is being measured</h2>
+<p>Three tasks across two tiers. <code>mcmc()</code> and <code>opt()</code> share almost no code in greta, so a change to one is invisible to the other, and <code>build</code> is the graph construction both of them depend on.</p>
+<table class="caption-top table">
+<colgroup>
+<col style="width: 19%">
+<col style="width: 19%">
+<col style="width: 61%">
+</colgroup>
+<thead>
+<tr class="header">
+<th style="text-align: left;">task</th>
+<th style="text-align: left;">call</th>
+<th style="text-align: left;">what it exercises</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td style="text-align: left;"><code>build</code></td>
+<td style="text-align: left;">the model function, ending in <code>model()</code></td>
+<td style="text-align: left;">defining the greta arrays and constructing the DAG, which is where the TensorFlow graph and its pointers are created. The cost paid once, before any inference</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;"><code>opt_adam</code></td>
+<td style="text-align: left;"><code>opt(m, optimiser = adam(), max_iterations = 100)</code></td>
+<td style="text-align: left;">100 iterations of maximum-likelihood optimisation</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">sampling</td>
+<td style="text-align: left;"><code>mcmc(m, chains, warmup, n_samples)</code></td>
+<td style="text-align: left;">greta’s default <code>hmc()</code> sampler</td>
+</tr>
+</tbody>
+</table>
+<section id="why-adam-when-opt-defaults-to-bfgs" class="level3">
+<h3 class="anchored" data-anchor-id="why-adam-when-opt-defaults-to-bfgs">Why <code>adam()</code>, when <code>opt()</code> defaults to <code>bfgs()</code></h3>
+<p>This is the one choice here that is not the default a user gets, so it needs a reason. greta has two kinds of optimiser, and they differ in who drives the loop:</p>
+<ul>
+<li><code>adam()</code> is a <code>tf_optimiser</code> - a Keras optimiser that greta steps through from a <code>while</code> loop <strong>in R</strong>, crossing into TensorFlow once per iteration. At <code>max_iterations = 100</code> that is exactly 100 round trips, the same work on every run and on every branch.</li>
+<li><code>bfgs()</code> is a <code>tfp_optimiser</code> - TFP runs the whole loop <strong>inside the TensorFlow graph</strong> and stops when it hits <code>tolerance = 1e-6</code>. The iteration count then depends on the data and the starting point, so timing it measures how quickly that model happened to converge.</li>
+</ul>
+<p><code>bench::mark()</code> needs each iteration to be the same amount of work, so <code>adam()</code> is the one that can be timed honestly. The cost of that choice is worth stating plainly: <strong>the deterministic tier does not measure the default <code>opt()</code> path</strong>, and a change touching only <code>tfp_optimiser</code> would not show up here at all.</p>
+</section>
+</section>
+<section id="are-the-diagnostics-trustworthy" class="level2">
+<h2 class="anchored" data-anchor-id="are-the-diagnostics-trustworthy">Are the diagnostics trustworthy?</h2>
+<p>An earlier version of this harness reshaped greta’s <code>mcmc.list</code> by hand and scrambled chains against variables, so the Rhat it reported described the reshape rather than the sampler. Everything below rests on that not happening again, so <code>00-check-diagnostics.R</code> tests it. All 4 groups of checks pass:</p>
+<ul>
+<li>the coercion <code>posterior::as_draws_array()</code> preserves dimensions, variable names, and every draw element for element</li>
+<li>four iid normal chains give Rhat 1.002 and bulk-ESS 1986, so the estimator is being called correctly</li>
+<li>four chains parked at different modes give Rhat 2.84, so it can fail</li>
+<li>the old by-hand reshape, reproduced deliberately and run on chains known to be good, turns Rhat 1 and bulk-ESS 1927 into Rhat 2.41 and bulk-ESS
+<ol start="5" type="1">
+<li>That is the signature recorded against the original bug, and the coercion in use does not produce it.</li>
+</ol></li>
+</ul>
+<p><code>posterior::rhat()</code> is rank-normalised and folded; <code>coda</code>’s <code>psrf[, 1]</code> is the classic estimator. They are different statistics, and only the first is in <code>results.rds</code>, so it is worth seeing them side by side on the same draws:</p>
+<div class="cell">
+<div class="cell-output-display">
+<table class="caption-top table table-sm table-striped small">
+<thead>
+<tr class="header">
+<th style="text-align: left;">variable</th>
+<th style="text-align: right;">rhat_posterior</th>
+<th style="text-align: right;">rhat_coda_point</th>
+<th style="text-align: right;">rhat_coda_upper</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td style="text-align: left;">int</td>
+<td style="text-align: right;">2.4225</td>
+<td style="text-align: right;">3.5130</td>
+<td style="text-align: right;">6.0123</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">coef</td>
+<td style="text-align: right;">1.1264</td>
+<td style="text-align: right;">1.1890</td>
+<td style="text-align: right;">1.4873</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">sd</td>
+<td style="text-align: right;">1.0018</td>
+<td style="text-align: right;">1.0048</td>
+<td style="text-align: right;">1.0144</td>
+</tr>
+</tbody>
+</table>
+</div>
+</div>
+<p>The two estimators differ in magnitude - they are not the same statistic, and should not be expected to agree to a decimal place. What matters is that they agree on the verdict, and on which way the difference runs: on the worst variable the rank-normalised statistic reads 2.42 where <code>coda</code>’s classic point estimate reads 3.51. The number in <code>results.rds</code> is the <strong>lower</strong> of the two, so nothing there is inflated by the choice of statistic. <code>coda</code>’s upper confidence limit <code>psrf[, 2]</code> is higher again at 6.01, which is why it is not what anyone should quote - an error already recorded against greta #790.</p>
+</section>
+<section id="did-the-chains-converge" class="level2">
+<h2 class="anchored" data-anchor-id="did-the-chains-converge">Did the chains converge?</h2>
+<p>Thresholds are from Vehtari et al.&nbsp;(2021):</p>
+<ul>
+<li>Rhat &lt; 1.01,</li>
+<li>bulk-ESS &gt; 400,</li>
+<li>at least four chains.</li>
+</ul>
+<p>Failures here cannot be compared on speed. A chain that did not converge is not a fast chain.</p>
+<p>Reported as a distribution across replicates, not a worst case: quoting <code>min(ESS)</code> and <code>max(rhat)</code> across five runs turns one bad replicate into an apparent total failure.</p>
+<div class="cell">
+<div class="cell-output-display">
+<table class="caption-top table table-sm table-striped small">
+<colgroup>
+<col style="width: 26%">
+<col style="width: 20%">
+<col style="width: 4%">
+<col style="width: 4%">
+<col style="width: 8%">
+<col style="width: 12%">
+<col style="width: 12%">
+<col style="width: 12%">
+</colgroup>
+<thead>
+<tr class="header">
+<th style="text-align: left;">branch</th>
+<th style="text-align: left;">model</th>
+<th style="text-align: right;">vars</th>
+<th style="text-align: right;">reps</th>
+<th style="text-align: right;">converged</th>
+<th style="text-align: right;">median min-ESS</th>
+<th style="text-align: right;">median med-ESS</th>
+<th style="text-align: right;">median max-Rhat</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td style="text-align: left;">data-interface-into-log-prob-739</td>
+<td style="text-align: left;">hierarchical_linear</td>
+<td style="text-align: right;">6</td>
+<td style="text-align: right;">5</td>
+<td style="text-align: right;">0</td>
+<td style="text-align: right;">142</td>
+<td style="text-align: right;">304</td>
+<td style="text-align: right;">1.028</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">data-interface-into-log-prob-739</td>
+<td style="text-align: left;">hierarchical_slopes_corr</td>
+<td style="text-align: right;">13</td>
+<td style="text-align: right;">5</td>
+<td style="text-align: right;">0</td>
+<td style="text-align: right;">8</td>
+<td style="text-align: right;">15</td>
+<td style="text-align: right;">1.419</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">data-interface-into-log-prob-739</td>
+<td style="text-align: left;">linear</td>
+<td style="text-align: right;">3</td>
+<td style="text-align: right;">5</td>
+<td style="text-align: right;">2</td>
+<td style="text-align: right;">378</td>
+<td style="text-align: right;">393</td>
+<td style="text-align: right;">1.012</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">data-interface-into-log-prob-739</td>
+<td style="text-align: left;">multiple_linear</td>
+<td style="text-align: right;">8</td>
+<td style="text-align: right;">5</td>
+<td style="text-align: right;">0</td>
+<td style="text-align: right;">61</td>
+<td style="text-align: right;">193</td>
+<td style="text-align: right;">1.079</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">data-interface-into-log-prob-739</td>
+<td style="text-align: left;">wide_linear</td>
+<td style="text-align: right;">202</td>
+<td style="text-align: right;">5</td>
+<td style="text-align: right;">0</td>
+<td style="text-align: right;">14</td>
+<td style="text-align: right;">1797</td>
+<td style="text-align: right;">1.225</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">main</td>
+<td style="text-align: left;">hierarchical_linear</td>
+<td style="text-align: right;">6</td>
+<td style="text-align: right;">5</td>
+<td style="text-align: right;">0</td>
+<td style="text-align: right;">41</td>
+<td style="text-align: right;">59</td>
+<td style="text-align: right;">1.083</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">main</td>
+<td style="text-align: left;">hierarchical_slopes_corr</td>
+<td style="text-align: right;">13</td>
+<td style="text-align: right;">5</td>
+<td style="text-align: right;">0</td>
+<td style="text-align: right;">11</td>
+<td style="text-align: right;">21</td>
+<td style="text-align: right;">1.310</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">main</td>
+<td style="text-align: left;">linear</td>
+<td style="text-align: right;">3</td>
+<td style="text-align: right;">5</td>
+<td style="text-align: right;">1</td>
+<td style="text-align: right;">173</td>
+<td style="text-align: right;">182</td>
+<td style="text-align: right;">1.017</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">main</td>
+<td style="text-align: left;">multiple_linear</td>
+<td style="text-align: right;">8</td>
+<td style="text-align: right;">5</td>
+<td style="text-align: right;">0</td>
+<td style="text-align: right;">71</td>
+<td style="text-align: right;">319</td>
+<td style="text-align: right;">1.048</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">main</td>
+<td style="text-align: left;">wide_linear</td>
+<td style="text-align: right;">202</td>
+<td style="text-align: right;">5</td>
+<td style="text-align: right;">0</td>
+<td style="text-align: right;">12</td>
+<td style="text-align: right;">2916</td>
+<td style="text-align: right;">1.377</td>
+</tr>
+</tbody>
+</table>
+</div>
+</div>
+<p>Three things that table says, and one it does not:</p>
+<ul>
+<li>3 of 50 runs passed both thresholds, so 47 are dropped from every comparison below.</li>
+<li>The two thresholds fail together rather than separately: 44 of the 47 failures miss both, with 2 failing on ESS alone and 1 on Rhat alone. Neither is the binding constraint - a run that mixes badly enough to miss one misses the other.</li>
+<li>Only linear ever passes. The other 4 models fail on every replicate, on both branches.</li>
+</ul>
+<p>What it does not say is that the gate is not the same test for every model. It asks every variable to clear 400, which is 3 variables for linear and 202 for wide_linear. The wide model is being asked a much harder question under the same label.</p>
+<p>That shows up in the gap between the two ESS columns above: on <code>wide_linear</code> the median across variables is 2817 while the minimum is 13. The model as a whole mixes; a handful of its parameters do not. The harness does not record <em>which</em> parameters, which is the first thing to add.</p>
+<section id="the-raw-data" class="level3">
+<h3 class="anchored" data-anchor-id="the-raw-data">The raw data</h3>
+<p>Every replicate, so the summaries above can be checked against what was actually measured.</p>
+<div class="cell">
+<div class="cell-output-display">
+<table class="caption-top table table-sm table-striped small">
+<colgroup>
+<col style="width: 23%">
+<col style="width: 18%">
+<col style="width: 2%">
+<col style="width: 5%">
+<col style="width: 3%">
+<col style="width: 9%">
+<col style="width: 11%">
+<col style="width: 9%">
+<col style="width: 8%">
+<col style="width: 6%">
+</colgroup>
+<thead>
+<tr class="header">
+<th style="text-align: left;">branch</th>
+<th style="text-align: left;">model</th>
+<th style="text-align: right;">rep</th>
+<th style="text-align: right;">elapsed</th>
+<th style="text-align: right;">vars</th>
+<th style="text-align: right;">ess_bulk_min</th>
+<th style="text-align: right;">ess_bulk_median</th>
+<th style="text-align: right;">ess_tail_min</th>
+<th style="text-align: right;">n_below_400</th>
+<th style="text-align: right;">rhat_max</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td style="text-align: left;">data-interface-into-log-prob-739</td>
+<td style="text-align: left;">hierarchical_linear</td>
+<td style="text-align: right;">1</td>
+<td style="text-align: right;">5.02</td>
+<td style="text-align: right;">6</td>
+<td style="text-align: right;">296.7</td>
+<td style="text-align: right;">431.3</td>
+<td style="text-align: right;">325.0</td>
+<td style="text-align: right;">3</td>
+<td style="text-align: right;">1.007</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">data-interface-into-log-prob-739</td>
+<td style="text-align: left;">hierarchical_linear</td>
+<td style="text-align: right;">2</td>
+<td style="text-align: right;">4.37</td>
+<td style="text-align: right;">6</td>
+<td style="text-align: right;">22.7</td>
+<td style="text-align: right;">30.4</td>
+<td style="text-align: right;">55.8</td>
+<td style="text-align: right;">5</td>
+<td style="text-align: right;">1.132</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">data-interface-into-log-prob-739</td>
+<td style="text-align: left;">hierarchical_linear</td>
+<td style="text-align: right;">3</td>
+<td style="text-align: right;">4.76</td>
+<td style="text-align: right;">6</td>
+<td style="text-align: right;">261.1</td>
+<td style="text-align: right;">390.1</td>
+<td style="text-align: right;">196.1</td>
+<td style="text-align: right;">3</td>
+<td style="text-align: right;">1.023</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">data-interface-into-log-prob-739</td>
+<td style="text-align: left;">hierarchical_linear</td>
+<td style="text-align: right;">4</td>
+<td style="text-align: right;">5.18</td>
+<td style="text-align: right;">6</td>
+<td style="text-align: right;">74.0</td>
+<td style="text-align: right;">210.8</td>
+<td style="text-align: right;">79.0</td>
+<td style="text-align: right;">5</td>
+<td style="text-align: right;">1.049</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">data-interface-into-log-prob-739</td>
+<td style="text-align: left;">hierarchical_linear</td>
+<td style="text-align: right;">5</td>
+<td style="text-align: right;">4.57</td>
+<td style="text-align: right;">6</td>
+<td style="text-align: right;">141.8</td>
+<td style="text-align: right;">304.2</td>
+<td style="text-align: right;">190.6</td>
+<td style="text-align: right;">4</td>
+<td style="text-align: right;">1.028</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">main</td>
+<td style="text-align: left;">hierarchical_linear</td>
+<td style="text-align: right;">1</td>
+<td style="text-align: right;">4.80</td>
+<td style="text-align: right;">6</td>
+<td style="text-align: right;">41.5</td>
+<td style="text-align: right;">59.1</td>
+<td style="text-align: right;">76.2</td>
+<td style="text-align: right;">5</td>
+<td style="text-align: right;">1.083</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">main</td>
+<td style="text-align: left;">hierarchical_linear</td>
+<td style="text-align: right;">2</td>
+<td style="text-align: right;">4.55</td>
+<td style="text-align: right;">6</td>
+<td style="text-align: right;">30.6</td>
+<td style="text-align: right;">54.7</td>
+<td style="text-align: right;">62.2</td>
+<td style="text-align: right;">5</td>
+<td style="text-align: right;">1.111</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">main</td>
+<td style="text-align: left;">hierarchical_linear</td>
+<td style="text-align: right;">3</td>
+<td style="text-align: right;">4.49</td>
+<td style="text-align: right;">6</td>
+<td style="text-align: right;">16.5</td>
+<td style="text-align: right;">38.9</td>
+<td style="text-align: right;">77.0</td>
+<td style="text-align: right;">5</td>
+<td style="text-align: right;">1.186</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">main</td>
+<td style="text-align: left;">hierarchical_linear</td>
+<td style="text-align: right;">4</td>
+<td style="text-align: right;">4.51</td>
+<td style="text-align: right;">6</td>
+<td style="text-align: right;">152.3</td>
+<td style="text-align: right;">224.8</td>
+<td style="text-align: right;">201.6</td>
+<td style="text-align: right;">5</td>
+<td style="text-align: right;">1.039</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">main</td>
+<td style="text-align: left;">hierarchical_linear</td>
+<td style="text-align: right;">5</td>
+<td style="text-align: right;">4.37</td>
+<td style="text-align: right;">6</td>
+<td style="text-align: right;">76.8</td>
+<td style="text-align: right;">129.0</td>
+<td style="text-align: right;">207.4</td>
+<td style="text-align: right;">5</td>
+<td style="text-align: right;">1.064</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">data-interface-into-log-prob-739</td>
+<td style="text-align: left;">hierarchical_slopes_corr</td>
+<td style="text-align: right;">1</td>
+<td style="text-align: right;">6.05</td>
+<td style="text-align: right;">13</td>
+<td style="text-align: right;">8.3</td>
+<td style="text-align: right;">18.9</td>
+<td style="text-align: right;">15.6</td>
+<td style="text-align: right;">10</td>
+<td style="text-align: right;">1.453</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">data-interface-into-log-prob-739</td>
+<td style="text-align: left;">hierarchical_slopes_corr</td>
+<td style="text-align: right;">2</td>
+<td style="text-align: right;">5.97</td>
+<td style="text-align: right;">13</td>
+<td style="text-align: right;">10.7</td>
+<td style="text-align: right;">15.2</td>
+<td style="text-align: right;">23.9</td>
+<td style="text-align: right;">10</td>
+<td style="text-align: right;">1.311</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">data-interface-into-log-prob-739</td>
+<td style="text-align: left;">hierarchical_slopes_corr</td>
+<td style="text-align: right;">3</td>
+<td style="text-align: right;">6.22</td>
+<td style="text-align: right;">13</td>
+<td style="text-align: right;">8.4</td>
+<td style="text-align: right;">15.5</td>
+<td style="text-align: right;">11.0</td>
+<td style="text-align: right;">11</td>
+<td style="text-align: right;">1.419</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">data-interface-into-log-prob-739</td>
+<td style="text-align: left;">hierarchical_slopes_corr</td>
+<td style="text-align: right;">4</td>
+<td style="text-align: right;">5.19</td>
+<td style="text-align: right;">13</td>
+<td style="text-align: right;">8.6</td>
+<td style="text-align: right;">23.3</td>
+<td style="text-align: right;">22.3</td>
+<td style="text-align: right;">10</td>
+<td style="text-align: right;">1.409</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">data-interface-into-log-prob-739</td>
+<td style="text-align: left;">hierarchical_slopes_corr</td>
+<td style="text-align: right;">5</td>
+<td style="text-align: right;">5.66</td>
+<td style="text-align: right;">13</td>
+<td style="text-align: right;">7.1</td>
+<td style="text-align: right;">11.8</td>
+<td style="text-align: right;">19.2</td>
+<td style="text-align: right;">10</td>
+<td style="text-align: right;">1.578</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">main</td>
+<td style="text-align: left;">hierarchical_slopes_corr</td>
+<td style="text-align: right;">1</td>
+<td style="text-align: right;">6.28</td>
+<td style="text-align: right;">13</td>
+<td style="text-align: right;">13.9</td>
+<td style="text-align: right;">20.8</td>
+<td style="text-align: right;">33.1</td>
+<td style="text-align: right;">10</td>
+<td style="text-align: right;">1.240</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">main</td>
+<td style="text-align: left;">hierarchical_slopes_corr</td>
+<td style="text-align: right;">2</td>
+<td style="text-align: right;">4.88</td>
+<td style="text-align: right;">13</td>
+<td style="text-align: right;">6.6</td>
+<td style="text-align: right;">9.2</td>
+<td style="text-align: right;">19.5</td>
+<td style="text-align: right;">10</td>
+<td style="text-align: right;">1.675</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">main</td>
+<td style="text-align: left;">hierarchical_slopes_corr</td>
+<td style="text-align: right;">3</td>
+<td style="text-align: right;">6.16</td>
+<td style="text-align: right;">13</td>
+<td style="text-align: right;">11.0</td>
+<td style="text-align: right;">15.6</td>
+<td style="text-align: right;">6.9</td>
+<td style="text-align: right;">12</td>
+<td style="text-align: right;">1.310</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">main</td>
+<td style="text-align: left;">hierarchical_slopes_corr</td>
+<td style="text-align: right;">4</td>
+<td style="text-align: right;">5.88</td>
+<td style="text-align: right;">13</td>
+<td style="text-align: right;">17.0</td>
+<td style="text-align: right;">35.3</td>
+<td style="text-align: right;">15.1</td>
+<td style="text-align: right;">10</td>
+<td style="text-align: right;">1.204</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">main</td>
+<td style="text-align: left;">hierarchical_slopes_corr</td>
+<td style="text-align: right;">5</td>
+<td style="text-align: right;">5.96</td>
+<td style="text-align: right;">13</td>
+<td style="text-align: right;">9.2</td>
+<td style="text-align: right;">22.9</td>
+<td style="text-align: right;">21.3</td>
+<td style="text-align: right;">12</td>
+<td style="text-align: right;">1.365</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">data-interface-into-log-prob-739</td>
+<td style="text-align: left;">linear</td>
+<td style="text-align: right;">1</td>
+<td style="text-align: right;">3.42</td>
+<td style="text-align: right;">3</td>
+<td style="text-align: right;">190.7</td>
+<td style="text-align: right;">202.8</td>
+<td style="text-align: right;">281.0</td>
+<td style="text-align: right;">2</td>
+<td style="text-align: right;">1.016</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">data-interface-into-log-prob-739</td>
+<td style="text-align: left;">linear</td>
+<td style="text-align: right;">2</td>
+<td style="text-align: right;">3.41</td>
+<td style="text-align: right;">3</td>
+<td style="text-align: right;">496.8</td>
+<td style="text-align: right;">525.1</td>
+<td style="text-align: right;">801.4</td>
+<td style="text-align: right;">0</td>
+<td style="text-align: right;">1.007</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">data-interface-into-log-prob-739</td>
+<td style="text-align: left;">linear</td>
+<td style="text-align: right;">3</td>
+<td style="text-align: right;">3.48</td>
+<td style="text-align: right;">3</td>
+<td style="text-align: right;">613.2</td>
+<td style="text-align: right;">632.4</td>
+<td style="text-align: right;">1149.7</td>
+<td style="text-align: right;">0</td>
+<td style="text-align: right;">1.003</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">data-interface-into-log-prob-739</td>
+<td style="text-align: left;">linear</td>
+<td style="text-align: right;">4</td>
+<td style="text-align: right;">3.41</td>
+<td style="text-align: right;">3</td>
+<td style="text-align: right;">378.4</td>
+<td style="text-align: right;">392.9</td>
+<td style="text-align: right;">561.9</td>
+<td style="text-align: right;">2</td>
+<td style="text-align: right;">1.014</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">data-interface-into-log-prob-739</td>
+<td style="text-align: left;">linear</td>
+<td style="text-align: right;">5</td>
+<td style="text-align: right;">3.32</td>
+<td style="text-align: right;">3</td>
+<td style="text-align: right;">158.3</td>
+<td style="text-align: right;">168.0</td>
+<td style="text-align: right;">253.5</td>
+<td style="text-align: right;">2</td>
+<td style="text-align: right;">1.012</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">main</td>
+<td style="text-align: left;">linear</td>
+<td style="text-align: right;">1</td>
+<td style="text-align: right;">3.12</td>
+<td style="text-align: right;">3</td>
+<td style="text-align: right;">395.1</td>
+<td style="text-align: right;">418.3</td>
+<td style="text-align: right;">598.2</td>
+<td style="text-align: right;">1</td>
+<td style="text-align: right;">1.007</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">main</td>
+<td style="text-align: left;">linear</td>
+<td style="text-align: right;">2</td>
+<td style="text-align: right;">3.57</td>
+<td style="text-align: right;">3</td>
+<td style="text-align: right;">725.6</td>
+<td style="text-align: right;">739.3</td>
+<td style="text-align: right;">1220.0</td>
+<td style="text-align: right;">0</td>
+<td style="text-align: right;">1.006</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">main</td>
+<td style="text-align: left;">linear</td>
+<td style="text-align: right;">3</td>
+<td style="text-align: right;">2.73</td>
+<td style="text-align: right;">3</td>
+<td style="text-align: right;">82.9</td>
+<td style="text-align: right;">86.0</td>
+<td style="text-align: right;">190.2</td>
+<td style="text-align: right;">2</td>
+<td style="text-align: right;">1.040</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">main</td>
+<td style="text-align: left;">linear</td>
+<td style="text-align: right;">4</td>
+<td style="text-align: right;">2.72</td>
+<td style="text-align: right;">3</td>
+<td style="text-align: right;">134.7</td>
+<td style="text-align: right;">138.2</td>
+<td style="text-align: right;">332.0</td>
+<td style="text-align: right;">2</td>
+<td style="text-align: right;">1.034</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">main</td>
+<td style="text-align: left;">linear</td>
+<td style="text-align: right;">5</td>
+<td style="text-align: right;">2.79</td>
+<td style="text-align: right;">3</td>
+<td style="text-align: right;">172.6</td>
+<td style="text-align: right;">181.6</td>
+<td style="text-align: right;">341.2</td>
+<td style="text-align: right;">2</td>
+<td style="text-align: right;">1.017</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">data-interface-into-log-prob-739</td>
+<td style="text-align: left;">multiple_linear</td>
+<td style="text-align: right;">1</td>
+<td style="text-align: right;">2.98</td>
+<td style="text-align: right;">8</td>
+<td style="text-align: right;">39.3</td>
+<td style="text-align: right;">92.3</td>
+<td style="text-align: right;">100.6</td>
+<td style="text-align: right;">8</td>
+<td style="text-align: right;">1.079</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">data-interface-into-log-prob-739</td>
+<td style="text-align: left;">multiple_linear</td>
+<td style="text-align: right;">2</td>
+<td style="text-align: right;">3.16</td>
+<td style="text-align: right;">8</td>
+<td style="text-align: right;">61.1</td>
+<td style="text-align: right;">194.2</td>
+<td style="text-align: right;">120.8</td>
+<td style="text-align: right;">7</td>
+<td style="text-align: right;">1.089</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">data-interface-into-log-prob-739</td>
+<td style="text-align: left;">multiple_linear</td>
+<td style="text-align: right;">3</td>
+<td style="text-align: right;">3.01</td>
+<td style="text-align: right;">8</td>
+<td style="text-align: right;">23.0</td>
+<td style="text-align: right;">157.3</td>
+<td style="text-align: right;">27.2</td>
+<td style="text-align: right;">7</td>
+<td style="text-align: right;">1.146</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">data-interface-into-log-prob-739</td>
+<td style="text-align: left;">multiple_linear</td>
+<td style="text-align: right;">4</td>
+<td style="text-align: right;">3.24</td>
+<td style="text-align: right;">8</td>
+<td style="text-align: right;">75.6</td>
+<td style="text-align: right;">296.3</td>
+<td style="text-align: right;">156.1</td>
+<td style="text-align: right;">6</td>
+<td style="text-align: right;">1.053</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">data-interface-into-log-prob-739</td>
+<td style="text-align: left;">multiple_linear</td>
+<td style="text-align: right;">5</td>
+<td style="text-align: right;">3.10</td>
+<td style="text-align: right;">8</td>
+<td style="text-align: right;">66.0</td>
+<td style="text-align: right;">193.0</td>
+<td style="text-align: right;">87.6</td>
+<td style="text-align: right;">7</td>
+<td style="text-align: right;">1.076</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">main</td>
+<td style="text-align: left;">multiple_linear</td>
+<td style="text-align: right;">1</td>
+<td style="text-align: right;">3.90</td>
+<td style="text-align: right;">8</td>
+<td style="text-align: right;">72.2</td>
+<td style="text-align: right;">318.9</td>
+<td style="text-align: right;">107.7</td>
+<td style="text-align: right;">5</td>
+<td style="text-align: right;">1.035</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">main</td>
+<td style="text-align: left;">multiple_linear</td>
+<td style="text-align: right;">2</td>
+<td style="text-align: right;">3.14</td>
+<td style="text-align: right;">8</td>
+<td style="text-align: right;">66.3</td>
+<td style="text-align: right;">224.0</td>
+<td style="text-align: right;">104.5</td>
+<td style="text-align: right;">7</td>
+<td style="text-align: right;">1.065</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">main</td>
+<td style="text-align: left;">multiple_linear</td>
+<td style="text-align: right;">3</td>
+<td style="text-align: right;">3.13</td>
+<td style="text-align: right;">8</td>
+<td style="text-align: right;">70.9</td>
+<td style="text-align: right;">344.5</td>
+<td style="text-align: right;">167.4</td>
+<td style="text-align: right;">7</td>
+<td style="text-align: right;">1.039</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">main</td>
+<td style="text-align: left;">multiple_linear</td>
+<td style="text-align: right;">4</td>
+<td style="text-align: right;">3.26</td>
+<td style="text-align: right;">8</td>
+<td style="text-align: right;">86.5</td>
+<td style="text-align: right;">358.2</td>
+<td style="text-align: right;">163.9</td>
+<td style="text-align: right;">5</td>
+<td style="text-align: right;">1.048</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">main</td>
+<td style="text-align: left;">multiple_linear</td>
+<td style="text-align: right;">5</td>
+<td style="text-align: right;">3.00</td>
+<td style="text-align: right;">8</td>
+<td style="text-align: right;">13.8</td>
+<td style="text-align: right;">222.7</td>
+<td style="text-align: right;">45.5</td>
+<td style="text-align: right;">7</td>
+<td style="text-align: right;">1.235</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">data-interface-into-log-prob-739</td>
+<td style="text-align: left;">wide_linear</td>
+<td style="text-align: right;">1</td>
+<td style="text-align: right;">14.51</td>
+<td style="text-align: right;">202</td>
+<td style="text-align: right;">13.9</td>
+<td style="text-align: right;">1797.1</td>
+<td style="text-align: right;">20.4</td>
+<td style="text-align: right;">14</td>
+<td style="text-align: right;">1.225</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">data-interface-into-log-prob-739</td>
+<td style="text-align: left;">wide_linear</td>
+<td style="text-align: right;">2</td>
+<td style="text-align: right;">13.11</td>
+<td style="text-align: right;">202</td>
+<td style="text-align: right;">288.9</td>
+<td style="text-align: right;">3234.8</td>
+<td style="text-align: right;">141.7</td>
+<td style="text-align: right;">1</td>
+<td style="text-align: right;">1.098</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">data-interface-into-log-prob-739</td>
+<td style="text-align: left;">wide_linear</td>
+<td style="text-align: right;">3</td>
+<td style="text-align: right;">14.80</td>
+<td style="text-align: right;">202</td>
+<td style="text-align: right;">40.6</td>
+<td style="text-align: right;">2811.7</td>
+<td style="text-align: right;">64.6</td>
+<td style="text-align: right;">1</td>
+<td style="text-align: right;">1.065</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">data-interface-into-log-prob-739</td>
+<td style="text-align: left;">wide_linear</td>
+<td style="text-align: right;">4</td>
+<td style="text-align: right;">12.74</td>
+<td style="text-align: right;">202</td>
+<td style="text-align: right;">5.5</td>
+<td style="text-align: right;">428.2</td>
+<td style="text-align: right;">17.7</td>
+<td style="text-align: right;">88</td>
+<td style="text-align: right;">1.954</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">data-interface-into-log-prob-739</td>
+<td style="text-align: left;">wide_linear</td>
+<td style="text-align: right;">5</td>
+<td style="text-align: right;">13.80</td>
+<td style="text-align: right;">202</td>
+<td style="text-align: right;">7.3</td>
+<td style="text-align: right;">400.5</td>
+<td style="text-align: right;">21.1</td>
+<td style="text-align: right;">101</td>
+<td style="text-align: right;">1.522</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">main</td>
+<td style="text-align: left;">wide_linear</td>
+<td style="text-align: right;">1</td>
+<td style="text-align: right;">13.88</td>
+<td style="text-align: right;">202</td>
+<td style="text-align: right;">45.0</td>
+<td style="text-align: right;">2988.3</td>
+<td style="text-align: right;">22.1</td>
+<td style="text-align: right;">2</td>
+<td style="text-align: right;">1.377</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">main</td>
+<td style="text-align: left;">wide_linear</td>
+<td style="text-align: right;">2</td>
+<td style="text-align: right;">15.00</td>
+<td style="text-align: right;">202</td>
+<td style="text-align: right;">8.6</td>
+<td style="text-align: right;">3498.1</td>
+<td style="text-align: right;">33.9</td>
+<td style="text-align: right;">6</td>
+<td style="text-align: right;">1.392</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">main</td>
+<td style="text-align: left;">wide_linear</td>
+<td style="text-align: right;">3</td>
+<td style="text-align: right;">14.73</td>
+<td style="text-align: right;">202</td>
+<td style="text-align: right;">8.6</td>
+<td style="text-align: right;">2915.8</td>
+<td style="text-align: right;">35.2</td>
+<td style="text-align: right;">13</td>
+<td style="text-align: right;">1.393</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">main</td>
+<td style="text-align: left;">wide_linear</td>
+<td style="text-align: right;">4</td>
+<td style="text-align: right;">14.35</td>
+<td style="text-align: right;">202</td>
+<td style="text-align: right;">11.7</td>
+<td style="text-align: right;">1268.9</td>
+<td style="text-align: right;">48.0</td>
+<td style="text-align: right;">21</td>
+<td style="text-align: right;">1.261</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">main</td>
+<td style="text-align: left;">wide_linear</td>
+<td style="text-align: right;">5</td>
+<td style="text-align: right;">11.91</td>
+<td style="text-align: right;">202</td>
+<td style="text-align: right;">661.3</td>
+<td style="text-align: right;">2821.4</td>
+<td style="text-align: right;">100.5</td>
+<td style="text-align: right;">0</td>
+<td style="text-align: right;">1.119</td>
+</tr>
+</tbody>
+</table>
+</div>
+</div>
+</section>
+</section>
+<section id="sampling-efficiency" class="level2">
+<h2 class="anchored" data-anchor-id="sampling-efficiency">Sampling efficiency</h2>
+<p>Effective samples per second, on the converged runs only.</p>
+<div class="cell">
+<div class="cell-output-display">
+<table class="caption-top table table-sm table-striped small">
+<thead>
+<tr class="header">
+<th style="text-align: left;">model</th>
+<th style="text-align: left;">branch</th>
+<th style="text-align: right;">runs</th>
+<th style="text-align: right;">median</th>
+<th style="text-align: right;">min</th>
+<th style="text-align: right;">max</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td style="text-align: left;">linear</td>
+<td style="text-align: left;">data-interface-into-log-prob-739</td>
+<td style="text-align: right;">2</td>
+<td style="text-align: right;">161.0</td>
+<td style="text-align: right;">145.8</td>
+<td style="text-align: right;">176.1</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">linear</td>
+<td style="text-align: left;">main</td>
+<td style="text-align: right;">1</td>
+<td style="text-align: right;">203.3</td>
+<td style="text-align: right;">203.3</td>
+<td style="text-align: right;">203.3</td>
+</tr>
+</tbody>
+</table>
+</div>
+</div>
+<section id="is-the-difference-resolved" class="level3">
+<h3 class="anchored" data-anchor-id="is-the-difference-resolved">Is the difference resolved?</h3>
+<p>A ratio of medians sitting inside a spread wider than the effect is not a finding, so this table is the one to read before the ratio.</p>
+<div class="cell">
+<div class="cell-output-display">
+<table class="caption-top table table-sm table-striped small">
+<thead>
+<tr class="header">
+<th style="text-align: left;">model</th>
+<th style="text-align: right;">ratio</th>
+<th style="text-align: right;">runs on the thinner branch</th>
+<th style="text-align: left;">verdict</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td style="text-align: left;">linear</td>
+<td style="text-align: right;">0.79</td>
+<td style="text-align: right;">1</td>
+<td style="text-align: left;">too few runs to say</td>
+</tr>
+</tbody>
+</table>
+</div>
+</div>
+<p>With 1 converged run on one branch and 2 on the other, there is no comparison here to make. The gate is doing its job; there is almost nothing left after it.</p>
+<div class="cell">
+<div class="cell-output-display">
+<div>
+<figure class="figure">
+<p><img src="results_files/figure-html/ess-plot-1.png" class="img-fluid figure-img" width="768"></p>
+</figure>
+</div>
+</div>
+</div>
+</section>
+</section>
+<section id="wall-time-for-attribution" class="level2">
+<h2 class="anchored" data-anchor-id="wall-time-for-attribution">Wall time, for attribution</h2>
+<p>A gain in effective samples per second is only a sampling gain if the sampler did not simply run longer or shorter. Tier 2 comes from <code>run_branches()</code> rather than <code>bench::mark()</code>, so there is no <code>bench_mark</code> object to summarise here and no columns bench computed - these are the raw <code>elapsed</code> seconds from every replicate.</p>
+<div class="cell">
+<div class="cell-output-display">
+<div>
+<figure class="figure">
+<p><img src="results_files/figure-html/elapsed-1.png" class="img-fluid figure-img" width="768"></p>
+</figure>
+</div>
+</div>
+</div>
+</section>
+<section id="deterministic-tier-build-and-optimise" class="level2">
+<h2 class="anchored" data-anchor-id="deterministic-tier-build-and-optimise">Deterministic tier: build and optimise</h2>
+<p>This half is <code>bench::mark()</code> through <code>cross::bench_branches()</code>, so bench’s own summary and plot apply - and unlike the sampling tier, every cell here has a result.</p>
+<p><code>summary(relative = TRUE)</code> normalises against the single fastest row in whatever it is handed. Given the whole table it compares <code>opt_adam</code> on one model against <code>build</code> on another, which is not a comparison anybody wants. So it is applied per model and per expression, where the only thing varying is the branch.</p>
+<div class="cell">
+<div class="cell-output-display">
+<table class="caption-top table table-sm table-striped small">
+<colgroup>
+<col style="width: 18%">
+<col style="width: 8%">
+<col style="width: 7%">
+<col style="width: 28%">
+<col style="width: 8%">
+<col style="width: 29%">
+</colgroup>
+<thead>
+<tr class="header">
+<th style="text-align: left;">model</th>
+<th style="text-align: left;">expression</th>
+<th style="text-align: right;">main (ms)</th>
+<th style="text-align: right;">data-interface-into-log-prob-739 (ms)</th>
+<th style="text-align: right;">main (rel)</th>
+<th style="text-align: right;">data-interface-into-log-prob-739 (rel)</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td style="text-align: left;">linear</td>
+<td style="text-align: left;">build</td>
+<td style="text-align: right;">19.6</td>
+<td style="text-align: right;">21.2</td>
+<td style="text-align: right;">1.000</td>
+<td style="text-align: right;">1.078</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">linear</td>
+<td style="text-align: left;">opt_adam</td>
+<td style="text-align: right;">77.6</td>
+<td style="text-align: right;">86.5</td>
+<td style="text-align: right;">1.000</td>
+<td style="text-align: right;">1.115</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">multiple_linear</td>
+<td style="text-align: left;">build</td>
+<td style="text-align: right;">19.3</td>
+<td style="text-align: right;">21.3</td>
+<td style="text-align: right;">1.000</td>
+<td style="text-align: right;">1.105</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">multiple_linear</td>
+<td style="text-align: left;">opt_adam</td>
+<td style="text-align: right;">78.6</td>
+<td style="text-align: right;">88.0</td>
+<td style="text-align: right;">1.000</td>
+<td style="text-align: right;">1.119</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">hierarchical_linear</td>
+<td style="text-align: left;">build</td>
+<td style="text-align: right;">28.9</td>
+<td style="text-align: right;">31.0</td>
+<td style="text-align: right;">1.000</td>
+<td style="text-align: right;">1.072</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">hierarchical_linear</td>
+<td style="text-align: left;">opt_adam</td>
+<td style="text-align: right;">109.4</td>
+<td style="text-align: right;">122.7</td>
+<td style="text-align: right;">1.000</td>
+<td style="text-align: right;">1.122</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">hierarchical_slopes_corr</td>
+<td style="text-align: left;">build</td>
+<td style="text-align: right;">25.1</td>
+<td style="text-align: right;">27.7</td>
+<td style="text-align: right;">1.000</td>
+<td style="text-align: right;">1.104</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">hierarchical_slopes_corr</td>
+<td style="text-align: left;">opt_adam</td>
+<td style="text-align: right;">129.3</td>
+<td style="text-align: right;">147.8</td>
+<td style="text-align: right;">1.000</td>
+<td style="text-align: right;">1.143</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">wide_linear</td>
+<td style="text-align: left;">build</td>
+<td style="text-align: right;">27.6</td>
+<td style="text-align: right;">31.1</td>
+<td style="text-align: right;">1.000</td>
+<td style="text-align: right;">1.126</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">wide_linear</td>
+<td style="text-align: left;">opt_adam</td>
+<td style="text-align: right;">122.7</td>
+<td style="text-align: right;">98.9</td>
+<td style="text-align: right;">1.241</td>
+<td style="text-align: right;">1.000</td>
+</tr>
+</tbody>
+</table>
+</div>
+</div>
+<section id="what-the-relative-columns-mean" class="level3">
+<h3 class="anchored" data-anchor-id="what-the-relative-columns-mean">What the relative columns mean</h3>
+<p>The faster branch in each row is 1.000 and the other is its multiple, so a relative of 1.126 means 12.6% slower. Every percentage below is <code>(relative - 1) * 100</code> computed from this table, never typed in. The absolute millisecond columns are there too, because a given percentage of a 19 ms build and of a 148 ms optimisation are not the same size of problem.</p>
+<p>Within each row the slower branch is the one above 1. Reading down the relative columns:</p>
+<ul>
+<li><code>build</code> is slower on data-interface-into-log-prob-739 in 5 of 5 models, by 7 to 13 per cent.</li>
+<li><code>opt_adam</code> is slower in 4 of 5 models, by up to 14 per cent. The exception is wide_linear, where the branch is 24 per cent <em>faster</em> - the one cell pointing the other way, and the one with the most real gradient work in it.</li>
+<li>Unlike the sampling tier, every one of these 10 cells has a number, because the work is deterministic and there is no convergence gate to fail.</li>
+</ul>
+</section>
+<section id="is-the-deterministic-difference-resolved" class="level3">
+<h3 class="anchored" data-anchor-id="is-the-deterministic-difference-resolved">Is the deterministic difference resolved?</h3>
+<p>The sampling tier has a resolution check and this one did not, which is the wrong way round: this is the half with a finding in it. Each <code>bench::mark()</code> cell holds its own per-iteration times, so the within-branch spread is already measured and does not need a separate A/A run. Quartiles rather than min-max, because a single slow iteration should not widen a branch’s interval enough to swallow the effect.</p>
+<div class="cell">
+<div class="cell-output-display">
+<table class="caption-top table table-sm table-striped small">
+<colgroup>
+<col style="width: 18%">
+<col style="width: 8%">
+<col style="width: 11%">
+<col style="width: 10%">
+<col style="width: 31%">
+<col style="width: 11%">
+<col style="width: 8%">
+</colgroup>
+<thead>
+<tr class="header">
+<th style="text-align: left;">model</th>
+<th style="text-align: left;">expression</th>
+<th style="text-align: right;">difference (ms)</th>
+<th style="text-align: left;">main IQR (ms)</th>
+<th style="text-align: left;">data-interface-into-log-prob-739 IQR (ms)</th>
+<th style="text-align: right;">spread / effect</th>
+<th style="text-align: left;">verdict</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td style="text-align: left;">linear</td>
+<td style="text-align: left;">build</td>
+<td style="text-align: right;">1.5</td>
+<td style="text-align: left;">19.6 - 20.4</td>
+<td style="text-align: left;">21 - 22.5</td>
+<td style="text-align: right;">1.0</td>
+<td style="text-align: left;">resolved</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">linear</td>
+<td style="text-align: left;">opt_adam</td>
+<td style="text-align: right;">8.9</td>
+<td style="text-align: left;">77.1 - 78.3</td>
+<td style="text-align: left;">86.1 - 87.6</td>
+<td style="text-align: right;">0.2</td>
+<td style="text-align: left;">resolved</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">multiple_linear</td>
+<td style="text-align: left;">build</td>
+<td style="text-align: right;">2.1</td>
+<td style="text-align: left;">19.2 - 21.6</td>
+<td style="text-align: left;">21.3 - 23.8</td>
+<td style="text-align: right;">1.2</td>
+<td style="text-align: left;">unresolved</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">multiple_linear</td>
+<td style="text-align: left;">opt_adam</td>
+<td style="text-align: right;">9.2</td>
+<td style="text-align: left;">77.8 - 80.6</td>
+<td style="text-align: left;">87.3 - 91.5</td>
+<td style="text-align: right;">0.5</td>
+<td style="text-align: left;">resolved</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">hierarchical_linear</td>
+<td style="text-align: left;">build</td>
+<td style="text-align: right;">4.4</td>
+<td style="text-align: left;">28.9 - 34.4</td>
+<td style="text-align: left;">31 - 35.5</td>
+<td style="text-align: right;">1.2</td>
+<td style="text-align: left;">unresolved</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">hierarchical_linear</td>
+<td style="text-align: left;">opt_adam</td>
+<td style="text-align: right;">13.5</td>
+<td style="text-align: left;">109.1 - 110</td>
+<td style="text-align: left;">122 - 123.9</td>
+<td style="text-align: right;">0.1</td>
+<td style="text-align: left;">resolved</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">hierarchical_slopes_corr</td>
+<td style="text-align: left;">build</td>
+<td style="text-align: right;">2.6</td>
+<td style="text-align: left;">25 - 30.8</td>
+<td style="text-align: left;">27.7 - 34.1</td>
+<td style="text-align: right;">2.5</td>
+<td style="text-align: left;">unresolved</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">hierarchical_slopes_corr</td>
+<td style="text-align: left;">opt_adam</td>
+<td style="text-align: right;">18.4</td>
+<td style="text-align: left;">128.1 - 130.8</td>
+<td style="text-align: left;">146.8 - 151.1</td>
+<td style="text-align: right;">0.2</td>
+<td style="text-align: left;">resolved</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">wide_linear</td>
+<td style="text-align: left;">build</td>
+<td style="text-align: right;">4.1</td>
+<td style="text-align: left;">27.6 - 30.2</td>
+<td style="text-align: left;">31.2 - 123.1</td>
+<td style="text-align: right;">22.5</td>
+<td style="text-align: left;">resolved</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">wide_linear</td>
+<td style="text-align: left;">opt_adam</td>
+<td style="text-align: right;">-24.0</td>
+<td style="text-align: left;">121.7 - 125</td>
+<td style="text-align: left;">98.6 - 101.2</td>
+<td style="text-align: right;">0.1</td>
+<td style="text-align: left;">resolved</td>
+</tr>
+</tbody>
+</table>
+</div>
+</div>
+<p>The last two columns are read together. The verdict says whether the branches separate at all; the ratio says whether the size of the difference means anything, and a ratio far above 1 means a cell can be read for direction only.</p>
+<ul>
+<li>All 5 <code>opt_adam</code> cells resolve, at ratios of 0.1 to 0.5. Differences of 8.9 to 24 ms against IQRs a few ms wide, so both the direction and the size hold up.</li>
+<li>Only 2 of 5 <code>build</code> cells resolve, at ratios up to 22.5. Differences of 1.5 to 4.4 ms, so per cell the effect mostly sits inside the spread.</li>
+</ul>
+<p>So the build penalty should not be quoted from any single model. What supports it is direction: the branch is slower in all 5 of 5 models, which under a null of no difference is a one in 32 result. That is a real effect too small for this number of iterations to resolve cell by cell, not an absent one - and raising <code>GRETA_SUITE_ITERATIONS</code> is what would settle it.</p>
+<p>The extreme case is wide_linear / build on data-interface-into-log-prob-739: an IQR of 31.2 to 123.1 ms, a 4-fold spread that no other cell comes near. It separates from the reference, so the direction stands, but a middle quartile spanning 92 ms cannot support a 4.1 ms claim - hence a ratio of 22.5. This is the largest model in the set and the one whose build allocates most, so the spread is more likely a property of the cell than an accident of when it ran.</p>
+</section>
+<section id="the-distributions-behind-those-medians" class="level3">
+<h3 class="anchored" data-anchor-id="the-distributions-behind-those-medians">The distributions behind those medians</h3>
+<p>One plot per expression, so each compares the two branches on like work rather than putting <code>build</code> and <code>opt_adam</code> on a shared axis.</p>
+<div class="cell">
+<div class="cell-output-display">
+<div>
+<figure class="figure">
+<p><img src="results_files/figure-html/bench-plot-build-1.png" class="img-fluid figure-img" width="768"></p>
+</figure>
+</div>
+</div>
+</div>
+<div class="cell">
+<div class="cell-output-display">
+<div>
+<figure class="figure">
+<p><img src="results_files/figure-html/bench-plot-opt-1.png" class="img-fluid figure-img" width="768"></p>
+</figure>
+</div>
+</div>
+</div>
+</section>
+</section>
+<section id="provenance" class="level2">
+<h2 class="anchored" data-anchor-id="provenance">Provenance</h2>
+<div class="cell">
+<div class="cell-output cell-output-stdout">
+<pre><code>List of 5
+ $ run_at  : chr "2026-09-21 14:56:33 AEST"
+ $ cpu     : chr "Apple M3"
+ $ cores   : int 8
+ $ platform:List of 11
+  ..$ version : chr "R version 4.6.1 (2026-06-24)"
+  ..$ os      : chr "macOS Tahoe 26.5.2"
+  ..$ system  : chr "aarch64, darwin23"
+  ..$ ui      : chr "X11"
+  ..$ language: chr "(EN)"
+  ..$ collate : chr "en_AU.UTF-8"
+  ..$ ctype   : chr "en_AU.UTF-8"
+  ..$ tz      : chr "Australia/Hobart"
+  ..$ date    : chr "2026-09-21"
+  ..$ pandoc  : chr "3.10 @ /opt/homebrew/bin/pandoc"
+  ..$ quarto  : chr "1.9.36 @ /usr/local/bin/quarto"
+  ..- attr(*, "class")= chr [1:2] "platform_info" "list"
+ $ packages:Classes 'packages_info' and 'data.frame':   4 obs. of  11 variables:
+  ..$ package      : chr [1:4] "bench" "cross" "reticulate" "tensorflow"
+  ..$ ondiskversion: chr [1:4] "1.1.4" "0.0.0.9000" "1.47.0" "2.20.0"
+  ..$ loadedversion: chr [1:4] "1.1.4" "0.0.0.9000" NA NA
+  ..$ path         : chr [1:4] "/Library/Frameworks/R.framework/Versions/4.6/Resources/library/bench" "/Library/Frameworks/R.framework/Versions/4.6/Resources/library/cross" "/Library/Frameworks/R.framework/Versions/4.6/Resources/library/reticulate" "/Library/Frameworks/R.framework/Versions/4.6/Resources/library/tensorflow"
+  ..$ loadedpath   : chr [1:4] "/Library/Frameworks/R.framework/Versions/4.6/Resources/library/bench" "/Library/Frameworks/R.framework/Versions/4.6/Resources/library/cross" NA NA
+  ..$ attached     : logi [1:4] TRUE TRUE FALSE FALSE
+  ..$ is_base      : logi [1:4] FALSE FALSE FALSE FALSE
+  ..$ date         : chr [1:4] "2025-01-16" "2026-08-05" "2026-09-03" "2025-08-22"
+  ..$ source       : chr [1:4] "CRAN (R 4.6.0)" "Github (DavisVaughan/cross@1a0db276e1f14b404efa6305b7890ffe24690f1d)" "CRAN (R 4.6.1)" "CRAN (R 4.6.0)"
+  ..$ md5ok        : logi [1:4] NA NA NA NA
+  ..$ library      : Factor w/ 2 levels "/Users/nick_1/Library/R/arm64/4.6/library",..: 2 2 2 2</code></pre>
+</div>
+</div>
+</section>
+
+</main>
+<!-- /main column -->
+<script id="quarto-html-after-body" type="application/javascript">
+  window.document.addEventListener("DOMContentLoaded", function (event) {
+    const icon = "";
+    const anchorJS = new window.AnchorJS();
+    anchorJS.options = {
+      placement: 'right',
+      icon: icon
+    };
+    anchorJS.add('.anchored');
+    const isCodeAnnotation = (el) => {
+      for (const clz of el.classList) {
+        if (clz.startsWith('code-annotation-')) {                     
+          return true;
+        }
+      }
+      return false;
+    }
+    const onCopySuccess = function(e) {
+      // button target
+      const button = e.trigger;
+      // don't keep focus
+      button.blur();
+      // flash "checked"
+      button.classList.add('code-copy-button-checked');
+      var currentTitle = button.getAttribute("title");
+      button.setAttribute("title", "Copied!");
+      let tooltip;
+      if (window.bootstrap) {
+        button.setAttribute("data-bs-toggle", "tooltip");
+        button.setAttribute("data-bs-placement", "left");
+        button.setAttribute("data-bs-title", "Copied!");
+        tooltip = new bootstrap.Tooltip(button, 
+          { trigger: "manual", 
+            customClass: "code-copy-button-tooltip",
+            offset: [0, -8]});
+        tooltip.show();    
+      }
+      setTimeout(function() {
+        if (tooltip) {
+          tooltip.hide();
+          button.removeAttribute("data-bs-title");
+          button.removeAttribute("data-bs-toggle");
+          button.removeAttribute("data-bs-placement");
+        }
+        button.setAttribute("title", currentTitle);
+        button.classList.remove('code-copy-button-checked');
+      }, 1000);
+      // clear code selection
+      e.clearSelection();
+    }
+    const getTextToCopy = function(trigger) {
+      const outerScaffold = trigger.parentElement.cloneNode(true);
+      const codeEl = outerScaffold.querySelector('code');
+      for (const childEl of codeEl.children) {
+        if (isCodeAnnotation(childEl)) {
+          childEl.remove();
+        }
+      }
+      return codeEl.innerText;
+    }
+    const clipboard = new window.ClipboardJS('.code-copy-button:not([data-in-quarto-modal])', {
+      text: getTextToCopy
+    });
+    clipboard.on('success', onCopySuccess);
+    if (window.document.getElementById('quarto-embedded-source-code-modal')) {
+      const clipboardModal = new window.ClipboardJS('.code-copy-button[data-in-quarto-modal]', {
+        text: getTextToCopy,
+        container: window.document.getElementById('quarto-embedded-source-code-modal')
+      });
+      clipboardModal.on('success', onCopySuccess);
+    }
+      var localhostRegex = new RegExp(/^(?:http|https):\/\/localhost\:?[0-9]*\//);
+      var mailtoRegex = new RegExp(/^mailto:/);
+        var filterRegex = new RegExp('/' + window.location.host + '/');
+      var isInternal = (href) => {
+          return filterRegex.test(href) || localhostRegex.test(href) || mailtoRegex.test(href);
+      }
+      // Inspect non-navigation links and adorn them if external
+     var links = window.document.querySelectorAll('a[href]:not(.nav-link):not(.navbar-brand):not(.toc-action):not(.sidebar-link):not(.sidebar-item-toggle):not(.pagination-link):not(.no-external):not([aria-hidden]):not(.dropdown-item):not(.quarto-navigation-tool):not(.about-link)');
+      for (var i=0; i<links.length; i++) {
+        const link = links[i];
+        if (!isInternal(link.href)) {
+          // undo the damage that might have been done by quarto-nav.js in the case of
+          // links that we want to consider external
+          if (link.dataset.originalHref !== undefined) {
+            link.href = link.dataset.originalHref;
+          }
+        }
+      }
+    function tippyHover(el, contentFn, onTriggerFn, onUntriggerFn) {
+      const config = {
+        allowHTML: true,
+        maxWidth: 500,
+        delay: 100,
+        arrow: false,
+        appendTo: function(el) {
+            return el.parentElement;
+        },
+        interactive: true,
+        interactiveBorder: 10,
+        theme: 'quarto',
+        placement: 'bottom-start',
+      };
+      if (contentFn) {
+        config.content = contentFn;
+      }
+      if (onTriggerFn) {
+        config.onTrigger = onTriggerFn;
+      }
+      if (onUntriggerFn) {
+        config.onUntrigger = onUntriggerFn;
+      }
+      window.tippy(el, config); 
+    }
+    const noterefs = window.document.querySelectorAll('a[role="doc-noteref"]');
+    for (var i=0; i<noterefs.length; i++) {
+      const ref = noterefs[i];
+      tippyHover(ref, function() {
+        // use id or data attribute instead here
+        let href = ref.getAttribute('data-footnote-href') || ref.getAttribute('href');
+        try { href = new URL(href).hash; } catch {}
+        const id = href.replace(/^#\/?/, "");
+        const note = window.document.getElementById(id);
+        if (note) {
+          return note.innerHTML;
+        } else {
+          return "";
+        }
+      });
+    }
+    const xrefs = window.document.querySelectorAll('a.quarto-xref');
+    const processXRef = (id, note) => {
+      // Strip column container classes
+      const stripColumnClz = (el) => {
+        el.classList.remove("page-full", "page-columns");
+        if (el.children) {
+          for (const child of el.children) {
+            stripColumnClz(child);
+          }
+        }
+      }
+      stripColumnClz(note)
+      if (id === null || id.startsWith('sec-')) {
+        // Special case sections, only their first couple elements
+        const container = document.createElement("div");
+        if (note.children && note.children.length > 2) {
+          container.appendChild(note.children[0].cloneNode(true));
+          for (let i = 1; i < note.children.length; i++) {
+            const child = note.children[i];
+            if (child.tagName === "P" && child.innerText === "") {
+              continue;
+            } else {
+              container.appendChild(child.cloneNode(true));
+              break;
+            }
+          }
+          if (window.Quarto?.typesetMath) {
+            window.Quarto.typesetMath(container);
+          }
+          return container.innerHTML
+        } else {
+          if (window.Quarto?.typesetMath) {
+            window.Quarto.typesetMath(note);
+          }
+          return note.innerHTML;
+        }
+      } else {
+        // Remove any anchor links if they are present
+        const anchorLink = note.querySelector('a.anchorjs-link');
+        if (anchorLink) {
+          anchorLink.remove();
+        }
+        if (window.Quarto?.typesetMath) {
+          window.Quarto.typesetMath(note);
+        }
+        if (note.classList.contains("callout")) {
+          return note.outerHTML;
+        } else {
+          return note.innerHTML;
+        }
+      }
+    }
+    for (var i=0; i<xrefs.length; i++) {
+      const xref = xrefs[i];
+      tippyHover(xref, undefined, function(instance) {
+        instance.disable();
+        let url = xref.getAttribute('href');
+        let hash = undefined; 
+        if (url.startsWith('#')) {
+          hash = url;
+        } else {
+          try { hash = new URL(url).hash; } catch {}
+        }
+        if (hash) {
+          const id = hash.replace(/^#\/?/, "");
+          const note = window.document.getElementById(id);
+          if (note !== null) {
+            try {
+              const html = processXRef(id, note.cloneNode(true));
+              instance.setContent(html);
+            } finally {
+              instance.enable();
+              instance.show();
+            }
+          } else {
+            // See if we can fetch this
+            fetch(url.split('#')[0])
+            .then(res => res.text())
+            .then(html => {
+              const parser = new DOMParser();
+              const htmlDoc = parser.parseFromString(html, "text/html");
+              const note = htmlDoc.getElementById(id);
+              if (note !== null) {
+                const html = processXRef(id, note);
+                instance.setContent(html);
+              } 
+            }).finally(() => {
+              instance.enable();
+              instance.show();
+            });
+          }
+        } else {
+          // See if we can fetch a full url (with no hash to target)
+          // This is a special case and we should probably do some content thinning / targeting
+          fetch(url)
+          .then(res => res.text())
+          .then(html => {
+            const parser = new DOMParser();
+            const htmlDoc = parser.parseFromString(html, "text/html");
+            const note = htmlDoc.querySelector('main.content');
+            if (note !== null) {
+              // This should only happen for chapter cross references
+              // (since there is no id in the URL)
+              // remove the first header
+              if (note.children.length > 0 && note.children[0].tagName === "HEADER") {
+                note.children[0].remove();
+              }
+              const html = processXRef(null, note);
+              instance.setContent(html);
+            } 
+          }).finally(() => {
+            instance.enable();
+            instance.show();
+          });
+        }
+      }, function(instance) {
+      });
+    }
+        let selectedAnnoteEl;
+        const selectorForAnnotation = ( cell, annotation) => {
+          let cellAttr = 'data-code-cell="' + cell + '"';
+          let lineAttr = 'data-code-annotation="' +  annotation + '"';
+          const selector = 'span[' + cellAttr + '][' + lineAttr + ']';
+          return selector;
+        }
+        const selectCodeLines = (annoteEl) => {
+          const doc = window.document;
+          const targetCell = annoteEl.getAttribute("data-target-cell");
+          const targetAnnotation = annoteEl.getAttribute("data-target-annotation");
+          const annoteSpan = window.document.querySelector(selectorForAnnotation(targetCell, targetAnnotation));
+          const lines = annoteSpan.getAttribute("data-code-lines").split(",");
+          const lineIds = lines.map((line) => {
+            return targetCell + "-" + line;
+          })
+          let top = null;
+          let height = null;
+          let parent = null;
+          if (lineIds.length > 0) {
+              //compute the position of the single el (top and bottom and make a div)
+              const el = window.document.getElementById(lineIds[0]);
+              top = el.offsetTop;
+              height = el.offsetHeight;
+              parent = el.parentElement.parentElement;
+            if (lineIds.length > 1) {
+              const lastEl = window.document.getElementById(lineIds[lineIds.length - 1]);
+              const bottom = lastEl.offsetTop + lastEl.offsetHeight;
+              height = bottom - top;
+            }
+            if (top !== null && height !== null && parent !== null) {
+              // cook up a div (if necessary) and position it 
+              let div = window.document.getElementById("code-annotation-line-highlight");
+              if (div === null) {
+                div = window.document.createElement("div");
+                div.setAttribute("id", "code-annotation-line-highlight");
+                div.style.position = 'absolute';
+                parent.appendChild(div);
+              }
+              div.style.top = top - 2 + "px";
+              div.style.height = height + 4 + "px";
+              div.style.left = 0;
+              let gutterDiv = window.document.getElementById("code-annotation-line-highlight-gutter");
+              if (gutterDiv === null) {
+                gutterDiv = window.document.createElement("div");
+                gutterDiv.setAttribute("id", "code-annotation-line-highlight-gutter");
+                gutterDiv.style.position = 'absolute';
+                const codeCell = window.document.getElementById(targetCell);
+                const gutter = codeCell.querySelector('.code-annotation-gutter');
+                gutter.appendChild(gutterDiv);
+              }
+              gutterDiv.style.top = top - 2 + "px";
+              gutterDiv.style.height = height + 4 + "px";
+            }
+            selectedAnnoteEl = annoteEl;
+          }
+        };
+        const unselectCodeLines = () => {
+          const elementsIds = ["code-annotation-line-highlight", "code-annotation-line-highlight-gutter"];
+          elementsIds.forEach((elId) => {
+            const div = window.document.getElementById(elId);
+            if (div) {
+              div.remove();
+            }
+          });
+          selectedAnnoteEl = undefined;
+        };
+          // Handle positioning of the toggle
+      window.addEventListener(
+        "resize",
+        throttle(() => {
+          elRect = undefined;
+          if (selectedAnnoteEl) {
+            selectCodeLines(selectedAnnoteEl);
+          }
+        }, 10)
+      );
+      function throttle(fn, ms) {
+      let throttle = false;
+      let timer;
+        return (...args) => {
+          if(!throttle) { // first call gets through
+              fn.apply(this, args);
+              throttle = true;
+          } else { // all the others get throttled
+              if(timer) clearTimeout(timer); // cancel #2
+              timer = setTimeout(() => {
+                fn.apply(this, args);
+                timer = throttle = false;
+              }, ms);
+          }
+        };
+      }
+        // Attach click handler to the DT
+        const annoteDls = window.document.querySelectorAll('dt[data-target-cell]');
+        for (const annoteDlNode of annoteDls) {
+          annoteDlNode.addEventListener('click', (event) => {
+            const clickedEl = event.target;
+            if (clickedEl !== selectedAnnoteEl) {
+              unselectCodeLines();
+              const activeEl = window.document.querySelector('dt[data-target-cell].code-annotation-active');
+              if (activeEl) {
+                activeEl.classList.remove('code-annotation-active');
+              }
+              selectCodeLines(clickedEl);
+              clickedEl.classList.add('code-annotation-active');
+            } else {
+              // Unselect the line
+              unselectCodeLines();
+              clickedEl.classList.remove('code-annotation-active');
+            }
+          });
+        }
+    const findCites = (el) => {
+      const parentEl = el.parentElement;
+      if (parentEl) {
+        const cites = parentEl.dataset.cites;
+        if (cites) {
+          return {
+            el,
+            cites: cites.split(' ')
+          };
+        } else {
+          return findCites(el.parentElement)
+        }
+      } else {
+        return undefined;
+      }
+    };
+    var bibliorefs = window.document.querySelectorAll('a[role="doc-biblioref"]');
+    for (var i=0; i<bibliorefs.length; i++) {
+      const ref = bibliorefs[i];
+      const citeInfo = findCites(ref);
+      if (citeInfo) {
+        tippyHover(citeInfo.el, function() {
+          var popup = window.document.createElement('div');
+          citeInfo.cites.forEach(function(cite) {
+            var citeDiv = window.document.createElement('div');
+            citeDiv.classList.add('hanging-indent');
+            citeDiv.classList.add('csl-entry');
+            var biblioDiv = window.document.getElementById('ref-' + cite);
+            if (biblioDiv) {
+              citeDiv.innerHTML = biblioDiv.innerHTML;
+            }
+            popup.appendChild(citeDiv);
+          });
+          return popup.innerHTML;
+        });
+      }
+    }
+  });
+  </script>
+</div> <!-- /content -->
+
+
+
+
+</body></html>

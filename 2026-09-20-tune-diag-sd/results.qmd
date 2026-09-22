@@ -1,0 +1,277 @@
+---
+title: "Tuning diag_sd on the right n"
+format: gfm
+execute:
+  echo: false
+  warning: false
+  message: false
+---
+
+```{r}
+#| label: setup
+library(here)
+library(fs)
+library(dplyr)
+library(tidyr)
+library(knitr)
+library(ggplot2)
+
+run_dir <- here("2026-09-20-tune-diag-sd")
+results_rds <- path(run_dir, "results.rds")
+if (!file_exists(results_rds)) {
+  stop(
+    "no results.rds - run 2026-09-20-tune-diag-sd/01-measure.R first",
+    call. = FALSE
+  )
+}
+raw <- readRDS(results_rds)
+results <- raw$results
+design <- raw$design
+
+fold <- function(x, digits = 2) formatC(x, digits = digits, format = "f")
+```
+
+## The question
+
+`tune_diag_sd()` shrinks the sample posterior variance towards `5e-3` before
+using it as the HMC proposal scale. The shrinkage is a weighted average of that
+variance and 5 pseudo-observations of `1e-3`, so `n` has to be the number of
+real observations behind the variance. greta passes
+`sum(!self$accept_history)`, a count of *rejected* proposals.
+
+Three branches, one baseline:
+
+- **main** — `n` is the rejection count
+- **tune-diag-sd-accepted** — drop the `!`, so `n` is the accepted count
+- **tune-diag-sd-samples** — `n` is `welford_state$count`, the number of samples
+  the variance was actually estimated from, which is what Stan passes
+
+```{r}
+#| label: design
+tibble::tibble(
+  setting = c("warmups", "reps per cell", "chains", "samples"),
+  value = c(
+    paste(design$warmups, collapse = ", "),
+    design$n_reps,
+    design$chains,
+    design$n_samples
+  )
+) |>
+  kable()
+```
+
+Measured on `r nrow(results)` runs across `r length(unique(results$model))`
+models. Commits, resolved at measure time:
+
+```{r}
+#| label: shas
+tibble::tibble(branch = names(raw$shas), sha = substr(raw$shas, 1, 10)) |>
+  kable()
+```
+
+## Is the effective sample size usable?
+
+`ess_min` collapses to zero whenever a single parameter never moves, which makes
+that cell useless for comparing branches however well everything else mixed. So
+this has to be checked before any ESS number is read.
+
+```{r}
+#| label: zeros
+results |>
+  group_by(branch) |>
+  summarise(
+    cells = n(),
+    cells_with_a_zero = sum(n_zero_ess > 0),
+    params_at_zero = sum(n_zero_ess),
+    params_total = sum(n_par),
+    .groups = "drop"
+  ) |>
+  kable()
+```
+
+```{r}
+#| label: zeros-by-model
+results |>
+  group_by(model) |>
+  summarise(
+    cells_with_a_zero = sum(n_zero_ess > 0),
+    cells = n(),
+    .groups = "drop"
+  ) |>
+  kable()
+```
+
+## Effective samples per second
+
+Three summaries, because they disagree in informative ways: the minimum is what
+limits a run but is the one the zeros destroy, the median survives them, and the
+mean is what earlier drafts of the measure script reported on its own.
+
+```{r}
+#| label: ess-per-sec
+results |>
+  group_by(branch, warmup) |>
+  summarise(
+    across(
+      c(ess_min_per_sec, ess_median_per_sec, ess_mean_per_sec),
+      \(x) mean(x)
+    ),
+    .groups = "drop"
+  ) |>
+  mutate(across(where(is.numeric) & !warmup, \(x) round(x, 2))) |>
+  kable()
+```
+
+```{r}
+#| label: ess-per-sec-by-model
+results |>
+  group_by(model, branch) |>
+  summarise(ess_median_per_sec = mean(ess_median_per_sec), .groups = "drop") |>
+  pivot_wider(names_from = branch, values_from = ess_median_per_sec) |>
+  mutate(across(where(is.numeric), \(x) round(x, 2))) |>
+  kable()
+```
+
+## The tuned proposal scale
+
+The quantity the change acts on directly, and the cheapest evidence the branches
+did anything different. Bigger is not better: it has to match the posterior
+scale, which is what the ESS tables above judge.
+
+```{r}
+#| label: diag-sd
+results |>
+  group_by(model, branch) |>
+  summarise(diag_sd = mean(diag_sd), .groups = "drop") |>
+  pivot_wider(names_from = branch, values_from = diag_sd) |>
+  mutate(across(where(is.numeric), \(x) round(x, 4))) |>
+  kable()
+```
+
+## Convergence
+
+A gain in ESS is only a gain if the chains still converged.
+
+```{r}
+#| label: rhat
+results |>
+  group_by(branch) |>
+  summarise(
+    worst_rhat = ifelse(
+      all(is.na(rhat_max)),
+      NA_real_,
+      round(max(rhat_max, na.rm = TRUE), 3)
+    ),
+    cells_without_rhat = sum(is.na(rhat_max)),
+    cells = n(),
+    .groups = "drop"
+  ) |>
+  kable()
+```
+
+## Wall time
+
+Recorded so that a change in ESS per second can be attributed to mixing rather
+than to the sampler simply running slower.
+
+```{r}
+#| label: elapsed
+results |>
+  group_by(branch, warmup) |>
+  summarise(elapsed = round(mean(elapsed), 3), .groups = "drop") |>
+  pivot_wider(names_from = branch, values_from = elapsed) |>
+  kable()
+```
+
+## Calibration
+
+From `01b-geweke.R`, one file per branch. A Geweke test compares prior draws
+against chain draws targeting the same joint distribution; if the sampler is
+correct they are the same distribution, so the KS test should not reject.
+greta's own test asserts `p >= 0.005`.
+
+`slice()` is the control: it sets `uses_metropolis = FALSE` and never calls
+`tune_diag_sd()`, so it must be unaffected. `hmc()` and `rwmh()` both tune
+`diag_sd` and are the ones that can move.
+
+This is a stochastic test. One p-value per sampler is weak evidence, and an
+occasional low value is expected rather than alarming; it is here to catch a
+gross calibration break, not to certify correctness.
+
+```{r}
+#| label: geweke
+geweke_files <- dir_ls(run_dir, glob = "*geweke-*.rds")
+if (length(geweke_files) == 0) {
+  cat("no geweke-*.rds in this directory - run 01b-geweke.R first\n")
+} else {
+  geweke <- lapply(geweke_files, \(f) readRDS(f)$results) |>
+    bind_rows()
+
+  geweke |>
+    select(branch, sampler, statistic, p_value, passes_greta_threshold) |>
+    mutate(
+      statistic = round(statistic, 4),
+      p_value = round(p_value, 4)
+    ) |>
+    arrange(sampler, branch) |>
+    kable()
+}
+```
+
+A KS p-value compresses the whole comparison to one number. The QQ plots below
+are the same data uncompressed: prior quantiles against chain quantiles, so a
+sampler that targets the right distribution sits on the diagonal. Drawn from the
+stored draws rather than at measure time, so a different plot needs no re-run.
+
+```{r}
+#| label: geweke-qq
+#| fig-height: 7
+#| fig-width: 8
+if (length(geweke_files) > 0) {
+  all_draws <- lapply(geweke_files, \(f) readRDS(f)$draws) |>
+    bind_rows()
+
+  quants <- (1:99) / 100
+  qq <- all_draws |>
+    group_by(branch, sampler) |>
+    reframe(
+      prior = quantile(target_theta, quants),
+      chain = quantile(greta_theta, quants)
+    )
+
+  ggplot(qq, aes(x = chain, y = prior)) +
+    geom_abline(slope = 1, intercept = 0, colour = "grey60") +
+    geom_point(size = 0.7, alpha = 0.7) +
+    facet_grid(sampler ~ branch) +
+    labs(
+      x = "chain quantiles",
+      y = "prior quantiles",
+      title = "Geweke QQ, by sampler and branch"
+    ) +
+    theme_minimal()
+}
+```
+
+```{r}
+#| label: geweke-model
+if (length(geweke_files) > 0) {
+  seeds <- lapply(geweke_files, \(f) {
+    g <- readRDS(f)
+    data.frame(branch = g$label, mu1 = g$mu1, sd1 = g$sd1, sd2 = g$sd2)
+  }) |>
+    bind_rows()
+
+  cat(
+    "all branches tested on the same model:",
+    ifelse(nrow(unique(seeds[, -1])) == 1, "yes", "NO - compare with care"),
+    "\n"
+  )
+}
+```
+
+## Provenance
+
+```{r}
+#| label: provenance
+str(raw$provenance)
+```

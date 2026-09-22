@@ -1,0 +1,630 @@
+---
+title: "MCMC suite: data nodes as tf$Variable"
+format:
+  html:
+    keep-md: true
+execute:
+  echo: false
+  warning: false
+  message: false
+---
+
+```{r}
+#| label: setup
+library(here)
+library(fs)
+library(dplyr)
+library(tidyr)
+library(knitr)
+library(ggplot2)
+library(bench)
+
+run_dir <- here("2026-09-21-mcmc-suite")
+
+raw <- readRDS(path(run_dir, "results.rds"))
+checks <- readRDS(path(run_dir, "check-diagnostics.rds"))
+
+design <- raw$design
+sampling <- raw$sampling
+timings <- raw$timings
+
+reference <- raw$branches[[1]]
+under_test <- raw$branches[[2]]
+
+# every run this compares has to have converged first. Without this gate, two
+# branches running byte-identical code once reported "23.55x faster" because
+# one had an Rhat of 3.0
+converged <- sampling |>
+  filter(rhat_max <= 1.01, n_below_400 == 0)
+```
+
+`{r} design$chains` chains, `{r} design$warmup` warmup,
+`{r} design$n_samples` samples, `{r} design$reps` replicates per model;
+`{r} design$iterations` iterations for the deterministic tier. These are greta's own defaults for
+`sampler`, `n_samples` and `warmup`, so this is what a user gets without
+asking for anything.
+
+```{r}
+#| label: shas
+tibble::tibble(
+  role = c("reference", "under test"),
+  branch = raw$branches,
+  sha = substr(unname(raw$shas), 1, 10)
+) |>
+  kable()
+```
+
+## What is being measured
+
+Three tasks across two tiers. `mcmc()` and `opt()` share almost no code in
+greta, so a change to one is invisible to the other, and `build` is the graph
+construction both of them depend on.
+
+| task | call | what it exercises |
+|:-----|:-----|:------------------|
+| `build` | the model function, ending in `model()` | defining the greta arrays and constructing the DAG, which is where the TensorFlow graph and its pointers are created. The cost paid once, before any inference |
+| `opt_adam` | `opt(m, optimiser = adam(), max_iterations = 100)` | 100 iterations of maximum-likelihood optimisation |
+| sampling | `mcmc(m, chains, warmup, n_samples)` | greta's default `hmc()` sampler |
+
+### Why `adam()`, when `opt()` defaults to `bfgs()`
+
+This is the one choice here that is not the default a user gets, so it needs a
+reason. greta has two kinds of optimiser, and they differ in who drives the
+loop:
+
+- `adam()` is a `tf_optimiser` - a Keras optimiser that greta steps through
+  from a `while` loop **in R**, crossing into TensorFlow once per iteration. At
+  `max_iterations = 100` that is exactly 100 round trips, the same work on
+  every run and on every branch.
+- `bfgs()` is a `tfp_optimiser` - TFP runs the whole loop **inside the
+  TensorFlow graph** and stops when it hits `tolerance = 1e-6`. The iteration
+  count then depends on the data and the starting point, so timing it measures
+  how quickly that model happened to converge.
+
+`bench::mark()` needs each iteration to be the same amount of work, so `adam()`
+is the one that can be timed honestly. The cost of that choice is worth stating
+plainly: **the deterministic tier does not measure the default `opt()` path**,
+and a change touching only `tfp_optimiser` would not show up here at all.
+
+## Are the diagnostics trustworthy?
+
+An earlier version of this harness reshaped greta's `mcmc.list` by hand and
+scrambled chains against variables, so the Rhat it reported described the
+reshape rather than the sampler. Everything below rests on that not happening
+again, so `00-check-diagnostics.R` tests it. All
+`{r} length(checks$checks)` groups of checks pass:
+
+- the coercion `posterior::as_draws_array()` preserves dimensions, variable
+  names, and every draw element for element
+- four iid normal chains give Rhat `{r} round(checks$good_rhat, 3)` and bulk-ESS
+  `{r} round(checks$good_ess)`, so the estimator is being called correctly
+- four chains parked at different modes give Rhat
+  `{r} round(checks$bad_rhat, 2)`, so it can fail
+- the old by-hand reshape, reproduced deliberately and run on chains known to
+  be good, turns Rhat `{r} round(checks$control_rhat, 3)` and bulk-ESS
+  `{r} round(checks$control_ess)` into Rhat
+  `{r} round(checks$control_scrambled_rhat, 2)` and bulk-ESS
+  `{r} round(checks$control_scrambled_ess, 1)`. That is the signature recorded
+  against the original bug, and the coercion in use does not produce it.
+
+`posterior::rhat()` is rank-normalised and folded; `coda`'s `psrf[, 1]` is the
+classic estimator. They are different statistics, and only the first is in
+`results.rds`, so it is worth seeing them side by side on the same draws:
+
+```{r}
+#| label: rhat-statistics
+checks$comparison |>
+  kable(row.names = FALSE)
+```
+
+```{r}
+#| label: rhat-agreement
+cmp <- checks$comparison
+worst <- cmp[which.max(cmp$rhat_posterior), ]
+```
+
+The two estimators differ in magnitude - they are not the same statistic, and
+should not be expected to agree to a decimal place. What matters is that they
+agree on the verdict, and on which way the difference runs: on the worst
+variable the rank-normalised statistic reads
+`{r} round(worst$rhat_posterior, 2)` where `coda`'s classic point estimate
+reads `{r} round(worst$rhat_coda_point, 2)`. The number in `results.rds` is
+the **lower** of the two, so nothing there is inflated by the choice of
+statistic. `coda`'s upper confidence limit `psrf[, 2]` is higher again at
+`{r} round(worst$rhat_coda_upper, 2)`, which is why it is not what anyone
+should quote - an error already recorded against greta #790.
+
+## Did the chains converge?
+
+Thresholds are from Vehtari et al. (2021):
+
+- Rhat < 1.01,
+- bulk-ESS > 400,
+- at least four chains.
+
+Failures here cannot be compared on speed. A chain that did not converge is not
+a fast chain.
+
+Reported as a distribution across replicates, not a worst case: quoting
+`min(ESS)` and `max(rhat)` across five runs turns one bad replicate into an
+apparent total failure.
+
+```{r}
+#| label: convergence
+sampling |>
+  group_by(branch, model) |>
+  summarise(
+    vars = first(n_variables),
+    reps = n(),
+    converged = sum(rhat_max <= 1.01 & n_below_400 == 0),
+    ess_bulk_min = round(median(ess_bulk_min)),
+    ess_bulk_median = round(median(ess_bulk_median)),
+    rhat_max = round(median(rhat_max), 3),
+    .groups = "drop"
+  ) |>
+  kable(
+    col.names = c(
+      "branch",
+      "model",
+      "vars",
+      "reps",
+      "converged",
+      "median min-ESS",
+      "median med-ESS",
+      "median max-Rhat"
+    )
+  )
+```
+
+Three things that table says, and one it does not:
+
+```{r}
+#| label: gate-counts
+n_total <- nrow(sampling)
+n_pass <- nrow(converged)
+
+fail_ess <- sampling$n_below_400 > 0
+fail_rhat <- sampling$rhat_max > 1.01
+n_fail_both <- sum(fail_ess & fail_rhat)
+n_fail_ess_only <- sum(fail_ess & !fail_rhat)
+n_fail_rhat_only <- sum(!fail_ess & fail_rhat)
+
+# the gate asks every variable to clear 400, so it is a much harder test on
+# wide_linear's 202 variables than on linear's 3 - one label, a different bar
+gate_width <- sampling |>
+  group_by(model) |>
+  summarise(vars = first(n_variables), .groups = "drop") |>
+  arrange(vars)
+
+wide <- sampling |> filter(model == "wide_linear")
+```
+
+- `{r} n_pass` of `{r} n_total` runs passed both thresholds, so
+  `{r} n_total - n_pass` are dropped from every comparison below.
+- The two thresholds fail together rather than separately:
+  `{r} n_fail_both` of the `{r} n_total - n_pass` failures miss both, with
+  `{r} n_fail_ess_only` failing on ESS alone and `{r} n_fail_rhat_only` on
+  Rhat alone. Neither is the binding constraint - a run that mixes badly
+  enough to miss one misses the other.
+- Only `{r} paste(sort(unique(converged$model)), collapse = ", ")` ever passes.
+  The other `{r} length(setdiff(unique(sampling$model), converged$model))`
+  models fail on every replicate, on both branches.
+
+What it does not say is that the gate is not the same test for every model. It
+asks every variable to clear 400, which is `{r} min(gate_width$vars)` variables
+for `{r} gate_width$model[[1]]` and `{r} max(gate_width$vars)` for
+`{r} gate_width$model[[nrow(gate_width)]]`. The wide model is being asked a
+much harder question under the same label.
+
+That shows up in the gap between the two ESS columns above: on `wide_linear`
+the median across variables is `{r} round(median(wide$ess_bulk_median))` while
+the minimum is `{r} round(median(wide$ess_bulk_min))`. The model as a whole
+mixes; a handful of its parameters do not. The harness does not record *which*
+parameters, which is the first thing to add.
+
+### The raw data
+
+Every replicate, so the summaries above can be checked against what was
+actually measured.
+
+```{r}
+#| label: raw-sampling
+sampling |>
+  arrange(model, branch, rep) |>
+  transmute(
+    branch,
+    model,
+    rep,
+    elapsed = round(elapsed, 2),
+    vars = n_variables,
+    ess_bulk_min = round(ess_bulk_min, 1),
+    ess_bulk_median = round(ess_bulk_median, 1),
+    ess_tail_min = round(ess_tail_min, 1),
+    n_below_400,
+    rhat_max = round(rhat_max, 3)
+  ) |>
+  kable(row.names = FALSE)
+```
+
+## Sampling efficiency
+
+Effective samples per second, on the converged runs only.
+
+```{r}
+#| label: ess-per-sec
+converged |>
+  group_by(model, branch) |>
+  summarise(
+    n = n(),
+    mid = median(ess_bulk_min_per_sec),
+    lo = min(ess_bulk_min_per_sec),
+    hi = max(ess_bulk_min_per_sec),
+    .groups = "drop"
+  ) |>
+  mutate(across(c(mid, lo, hi), \(x) round(x, 1))) |>
+  kable(col.names = c("model", "branch", "runs", "median", "min", "max"))
+```
+
+### Is the difference resolved?
+
+A ratio of medians sitting inside a spread wider than the effect is not a
+finding, so this table is the one to read before the ratio.
+
+```{r}
+#| label: resolved
+spread <- converged |>
+  group_by(model, branch) |>
+  summarise(
+    n = n(),
+    mid = median(ess_bulk_min_per_sec),
+    lo = min(ess_bulk_min_per_sec),
+    hi = max(ess_bulk_min_per_sec),
+    .groups = "drop"
+  ) |>
+  pivot_wider(names_from = branch, values_from = c(n, mid, lo, hi))
+
+spread |>
+  mutate(
+    ratio = round(
+      .data[[paste0("mid_", under_test)]] / .data[[paste0("mid_", reference)]],
+      2
+    ),
+    # a single run gives lo == hi, an interval of zero width that cannot
+    # overlap anything - so the replicate count has to decide the verdict
+    # before the intervals get a say
+    runs = pmin(
+      .data[[paste0("n_", under_test)]],
+      .data[[paste0("n_", reference)]]
+    ),
+    overlap = !(
+      .data[[paste0("lo_", under_test)]] >
+        .data[[paste0("hi_", reference)]] |
+        .data[[paste0("hi_", under_test)]] <
+          .data[[paste0("lo_", reference)]]
+    ),
+    verdict = case_when(
+      runs < 2 ~ "too few runs to say",
+      overlap ~ "unresolved",
+      .default = "resolved"
+    )
+  ) |>
+  select(model, ratio, runs, verdict) |>
+  kable(col.names = c("model", "ratio", "runs on the thinner branch", "verdict"))
+```
+
+With `{r} min(table(converged$branch))` converged run on one branch and
+`{r} max(table(converged$branch))` on the other, there is no comparison here to
+make. The gate is doing its job; there is almost nothing left after it.
+
+```{r}
+#| label: ess-plot
+#| fig-height: 3
+#| fig-width: 8
+ggplot(converged, aes(x = model, y = ess_bulk_min_per_sec, colour = branch)) +
+  geom_point(position = position_dodge(width = 0.4), alpha = 0.8, size = 2) +
+  coord_flip() +
+  labs(
+    x = NULL,
+    y = "min bulk-ESS per second",
+    colour = NULL,
+    title = "Sampling efficiency, one point per converged replicate"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+
+## Wall time, for attribution
+
+A gain in effective samples per second is only a sampling gain if the sampler
+did not simply run longer or shorter. Tier 2 comes from `run_branches()` rather
+than `bench::mark()`, so there is no `bench_mark` object to summarise here and
+no columns bench computed - these are the raw `elapsed` seconds from every
+replicate.
+
+```{r}
+#| label: elapsed
+#| fig-height: 3.5
+#| fig-width: 8
+ggplot(sampling, aes(x = elapsed, y = model, colour = branch)) +
+  geom_point(position = position_dodge(width = 0.4), alpha = 0.8, size = 2) +
+  labs(
+    x = "elapsed (seconds)",
+    y = NULL,
+    colour = NULL,
+    title = "Sampling wall time, one point per replicate"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+
+## Deterministic tier: build and optimise
+
+This half is `bench::mark()` through `cross::bench_branches()`, so bench's own
+summary and plot apply - and unlike the sampling tier, every cell here has a
+result.
+
+`summary(relative = TRUE)` normalises against the single fastest row in
+whatever it is handed. Given the whole table it compares `opt_adam` on one
+model against `build` on another, which is not a comparison anybody wants. So
+it is applied per model and per expression, where the only thing varying is the
+branch.
+
+```{r}
+#| label: bench-relative
+expr_chr <- as.character(timings$expression)
+cells <- unique(data.frame(model = timings$model, expression = expr_chr))
+
+relative <- lapply(
+  seq_len(nrow(cells)),
+  function(i) {
+    keep <- timings$model == cells$model[i] & expr_chr == cells$expression[i]
+    cell <- timings[keep, ]
+    data.frame(
+      model = cells$model[i],
+      expression = cells$expression[i],
+      branch = summary(cell)$branch,
+      absolute = as.numeric(summary(cell)$median),
+      relative = as.numeric(summary(cell, relative = TRUE)$median)
+    )
+  }
+) |>
+  bind_rows()
+
+relative |>
+  mutate(absolute = round(absolute * 1000, 1), relative = round(relative, 3)) |>
+  pivot_wider(names_from = branch, values_from = c(absolute, relative)) |>
+  select(
+    model,
+    expression,
+    paste0("absolute_", reference),
+    paste0("absolute_", under_test),
+    paste0("relative_", reference),
+    paste0("relative_", under_test)
+  ) |>
+  kable(
+    col.names = c(
+      "model",
+      "expression",
+      paste(reference, "(ms)"),
+      paste(under_test, "(ms)"),
+      paste(reference, "(rel)"),
+      paste(under_test, "(rel)")
+    )
+  )
+```
+
+```{r}
+#| label: bench-direction
+direction <- relative |>
+  select(-absolute) |>
+  pivot_wider(names_from = branch, values_from = relative) |>
+  mutate(slower = .data[[under_test]] > .data[[reference]])
+
+build_rows <- direction |> filter(expression == "build")
+opt_rows <- direction |> filter(expression == "opt_adam")
+
+widest_build <- relative |>
+  filter(expression == "build", branch == under_test) |>
+  slice_max(relative, n = 1)
+```
+
+### What the relative columns mean
+
+The faster branch in each row is 1.000 and the other is its multiple, so a
+relative of `{r} sprintf("%.3f", widest_build$relative)` means
+`{r} round(100 * (widest_build$relative - 1), 1)`% slower. Every percentage
+below is `(relative - 1) * 100` computed from this table, never typed in. The
+absolute millisecond columns are there too, because a given percentage of a
+`{r} round(min(relative$absolute) * 1000)` ms build and of a
+`{r} round(max(relative$absolute) * 1000)` ms optimisation are not the same
+size of problem.
+
+Within each row the slower branch is the one above 1. Reading down the relative
+columns:
+
+- `build` is slower on `{r} under_test` in `{r} sum(build_rows$slower)` of
+  `{r} nrow(build_rows)` models, by
+  `{r} round(100 * (min(build_rows[[under_test]]) - 1))` to
+  `{r} round(100 * (max(build_rows[[under_test]]) - 1))` per cent.
+- `opt_adam` is slower in `{r} sum(opt_rows$slower)` of `{r} nrow(opt_rows)`
+  models, by up to
+  `{r} round(100 * (max(opt_rows[[under_test]]) - 1))` per cent. The exception
+  is `{r} opt_rows$model[!opt_rows$slower]`, where the branch is
+  `{r} round(100 * (max(opt_rows[[reference]][!opt_rows$slower]) - 1))` per
+  cent *faster* - the one cell pointing the other way, and the one with the
+  most real gradient work in it.
+- Unlike the sampling tier, every one of these `{r} nrow(direction)` cells has
+  a number, because the work is deterministic and there is no convergence gate
+  to fail.
+
+### Is the deterministic difference resolved?
+
+The sampling tier has a resolution check and this one did not, which is the
+wrong way round: this is the half with a finding in it. Each `bench::mark()`
+cell holds its own per-iteration times, so the within-branch spread is already
+measured and does not need a separate A/A run. Quartiles rather than min-max,
+because a single slow iteration should not widen a branch's interval enough to
+swallow the effect.
+
+```{r}
+#| label: bench-noise
+noise <- lapply(
+  seq_len(nrow(cells)),
+  function(i) {
+    keep <- timings$model == cells$model[i] & expr_chr == cells$expression[i]
+    cell <- timings[keep, ]
+    lapply(
+      seq_len(nrow(cell)),
+      function(j) {
+        times <- as.numeric(cell$time[[j]]) * 1000
+        data.frame(
+          model = cells$model[i],
+          expression = cells$expression[i],
+          branch = cell$branch[[j]],
+          mid = median(times),
+          q25 = unname(quantile(times, 0.25)),
+          q75 = unname(quantile(times, 0.75))
+        )
+      }
+    ) |>
+      bind_rows()
+  }
+) |>
+  bind_rows()
+
+resolved_bench <- noise |>
+  pivot_wider(names_from = branch, values_from = c(mid, q25, q75)) |>
+  mutate(
+    difference = .data[[paste0("mid_", under_test)]] -
+      .data[[paste0("mid_", reference)]],
+    overlap = !(
+      .data[[paste0("q25_", under_test)]] >
+        .data[[paste0("q75_", reference)]] |
+        .data[[paste0("q75_", under_test)]] <
+          .data[[paste0("q25_", reference)]]
+    ),
+    # separating at the quartiles says the direction is real; it does not make
+    # the size quotable. Reported as a ratio rather than a third verdict,
+    # because any cutoff would be invented - and at one point a cell sat
+    # exactly on it and flipped on rounding
+    widest_iqr = pmax(
+      .data[[paste0("q75_", reference)]] - .data[[paste0("q25_", reference)]],
+      .data[[paste0("q75_", under_test)]] - .data[[paste0("q25_", under_test)]]
+    ),
+    spread_ratio = widest_iqr / abs(difference),
+    verdict = ifelse(overlap, "unresolved", "resolved")
+  )
+
+resolved_bench |>
+  transmute(
+    model,
+    expression,
+    difference = round(difference, 1),
+    reference_iqr = paste0(
+      round(.data[[paste0("q25_", reference)]], 1),
+      " - ",
+      round(.data[[paste0("q75_", reference)]], 1)
+    ),
+    under_test_iqr = paste0(
+      round(.data[[paste0("q25_", under_test)]], 1),
+      " - ",
+      round(.data[[paste0("q75_", under_test)]], 1)
+    ),
+    spread_ratio = round(spread_ratio, 1),
+    verdict
+  ) |>
+  kable(
+    col.names = c(
+      "model",
+      "expression",
+      "difference (ms)",
+      paste(reference, "IQR (ms)"),
+      paste(under_test, "IQR (ms)"),
+      "spread / effect",
+      "verdict"
+    )
+  )
+```
+
+```{r}
+#| label: bench-noise-counts
+build_noise <- resolved_bench |> filter(expression == "build")
+opt_noise <- resolved_bench |> filter(expression == "opt_adam")
+
+# the widest cell on the branch under test, named rather than assumed: which
+# cell misbehaves is a property of the run, not something to hard-code
+widest <- noise |>
+  filter(branch == under_test) |>
+  mutate(width = q75 / q25) |>
+  slice_max(width, n = 1)
+
+widest_diff <- resolved_bench |>
+  filter(model == widest$model, expression == widest$expression) |>
+  pull(difference) |>
+  abs()
+```
+
+The last two columns are read together. The verdict says whether the branches
+separate at all; the ratio says whether the size of the difference means
+anything, and a ratio far above 1 means a cell can be read for direction only.
+
+- All `{r} nrow(opt_noise)` `opt_adam` cells resolve, at ratios of
+  `{r} round(min(opt_noise$spread_ratio), 1)` to
+  `{r} round(max(opt_noise$spread_ratio), 1)`. Differences of
+  `{r} round(min(abs(opt_noise$difference)), 1)` to
+  `{r} round(max(abs(opt_noise$difference)), 1)` ms against IQRs a few ms
+  wide, so both the direction and the size hold up.
+- Only `{r} sum(build_noise$verdict == "resolved")` of
+  `{r} nrow(build_noise)` `build` cells resolve, at ratios up to
+  `{r} round(max(build_noise$spread_ratio), 1)`. Differences of
+  `{r} round(min(build_noise$difference), 1)` to
+  `{r} round(max(build_noise$difference), 1)` ms, so per cell the effect
+  mostly sits inside the spread.
+
+So the build penalty should not be quoted from any single model. What supports
+it is direction: the branch is slower in all `{r} nrow(build_rows)` of
+`{r} nrow(build_rows)` models, which under a null of no difference is a one in
+`{r} 2^nrow(build_rows)` result. That is a real effect too small for this
+number of iterations to resolve cell by cell, not an absent one - and raising
+`GRETA_SUITE_ITERATIONS` is what would settle it.
+
+The extreme case is `{r} widest$model` / `{r} widest$expression` on
+`{r} under_test`: an IQR of `{r} round(widest$q25, 1)` to
+`{r} round(widest$q75, 1)` ms, a `{r} round(widest$width, 1)`-fold spread that
+no other cell comes near. It separates from the reference, so the direction
+stands, but a middle quartile spanning
+`{r} round(widest$q75 - widest$q25)` ms cannot support a
+`{r} round(widest_diff, 1)` ms claim - hence a ratio of
+`{r} round(max(build_noise$spread_ratio), 1)`. This is the largest model in the
+set and the one whose build allocates most, so the spread is more likely a
+property of the cell than an accident of when it ran.
+
+### The distributions behind those medians
+
+One plot per expression, so each compares the two branches on like work rather
+than putting `build` and `opt_adam` on a shared axis.
+
+```{r}
+#| label: bench-plot-build
+#| fig-height: 4
+#| fig-width: 8
+autoplot(timings[expr_chr == "build", ]) +
+  labs(title = "build, by branch") +
+  theme_minimal()
+```
+
+```{r}
+#| label: bench-plot-opt
+#| fig-height: 4
+#| fig-width: 8
+autoplot(timings[expr_chr == "opt_adam", ]) +
+  labs(title = "opt_adam, by branch") +
+  theme_minimal()
+```
+
+## Provenance
+
+```{r}
+#| label: provenance
+str(raw$provenance)
+```

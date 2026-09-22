@@ -50,9 +50,28 @@ greta_repo <- path_expand(Sys.getenv("GRETA_REPO", "~/github/greta-dev/greta"))
 models_file <- path(here("suite"), "models.R")
 stopifnot(file_exists(models_file))
 
-branch_fix <- Sys.getenv("GRETA_FIX_BRANCH", "tune-diag-sd-n")
+# Three ways, not two. The fix has two candidate values of `n` and they are
+# worth separating, because they answer different questions:
+#
+#   tune-diag-sd-accepted  drop the `!`, so n is the accepted count. This is
+#                          what the code meant before 3c433f96 hoisted a guard
+#                          expression into the count.
+#   tune-diag-sd-samples   n is welford_state$count, the number of samples the
+#                          variance was actually estimated from. This is what
+#                          Stan uses, and since ef013050 fed the accumulator
+#                          every draw it is the one that matches the estimator.
+#
+# Measuring both against the same baseline says whether the second is worth the
+# larger change, rather than assuming it.
 branch_reference <- "main"
-branches <- c(branch_reference, branch_fix)
+branches_under_test <- strsplit(
+  Sys.getenv(
+    "GRETA_TDS_BRANCHES",
+    "tune-diag-sd-accepted,tune-diag-sd-samples"
+  ),
+  ","
+)[[1]]
+branches <- c(branch_reference, branches_under_test)
 
 # Short warmups first: that is where the two values of n differ most in relative
 # terms, and where the gate can fail.
@@ -132,11 +151,21 @@ raw <- with_dir(
           warmup = warmup,
           rep = rep,
           elapsed = elapsed,
-          # the slowest-mixing parameter is what limits a run, so carry the
-          # minimum as well as the mean rather than an average that hides it
+          # all three, because they answer different questions and disagree in
+          # informative ways. The minimum is what limits a run, but it is also
+          # the fragile one: a parameter that never moved gets ESS 0 and drags
+          # the minimum to zero however well everything else mixed, which makes
+          # the cell useless for comparing branches. The median survives that;
+          # the mean is what the earlier drafts of this script reported.
           ess_min = min(ess),
+          ess_median = stats::median(ess),
           ess_mean = mean(ess),
+          # so the zeros are counted rather than hidden inside a summary
+          n_zero_ess = sum(ess == 0),
+          n_par = length(ess),
           ess_min_per_sec = min(ess) / elapsed,
+          ess_median_per_sec = stats::median(ess) / elapsed,
+          ess_mean_per_sec = mean(ess) / elapsed,
           rhat_max = safe_rhat(draws),
           diag_sd = tuned_diag_sd(draws)
         )
@@ -179,17 +208,21 @@ raw <- with_dir(
   )
 )
 
-results <- raw |>
-  set_names(branches) |>
-  imap(\(x, branch) transform(x, branch = branch)) |>
-  bind_rows()
+# run_branches() returns a tibble of `branch` and a `result` list-column, one
+# row per branch -- not a list named by branch
+results <- raw$result |>
+  set_names(raw$branch) |>
+  bind_rows(.id = "branch")
 
 # SHAs are captured here, at measure time. Branches move, so resolving them when
 # the report renders would record commits that were never measured.
 saveRDS(
   list(
     results = results,
-    branches = c(reference = branch_reference, fix = branch_fix),
+    branches = list(
+      reference = branch_reference,
+      under_test = branches_under_test
+    ),
     shas = vapply(branches, \(b) git_sha(greta_repo, b), character(1)),
     design = list(
       warmups = as.integer(strsplit(warmups, ",")[[1]]),

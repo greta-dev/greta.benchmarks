@@ -1,0 +1,117 @@
+---
+title: "What tf$Variable-backed data nodes cost"
+format: gfm
+execute:
+  echo: false
+  warning: false
+  message: false
+---
+
+```{r}
+#| label: setup
+library(here)
+library(fs)
+library(dplyr)
+library(tidyr)
+library(knitr)
+
+run_dir <- here("2026-09-21-data-variables-cost")
+files <- dir_ls(run_dir, glob = "*results-*.rds")
+raw <- lapply(files, readRDS)
+results <- bind_rows(lapply(raw, \(x) x$results))
+
+design <- raw[[1]]
+shas <- vapply(raw, \(x) substr(x$sha, 1, 10), character(1))
+names(shas) <- vapply(raw, \(x) x$label, character(1))
+```
+
+greta-dev/greta#739 gives every data node a persistent `tf$Variable` instead of
+folding its value into each trace. That buys swapping data without a retrace.
+This is what it costs everyone who never swaps anything.
+
+`r design$n_reps` reps per model, `r design$warmup` warmup and
+`r design$n_samples` samples on `r design$chains` chains.
+
+```{r}
+#| label: shas
+tibble::tibble(branch = names(shas), sha = unname(shas)) |>
+  kable()
+```
+
+## Time
+
+```{r}
+#| label: time
+results |>
+  group_by(model, label) |>
+  summarise(
+    build = median(build_secs),
+    mcmc = median(mcmc_secs),
+    .groups = "drop"
+  ) |>
+  pivot_wider(names_from = label, values_from = c(build, mcmc)) |>
+  mutate(across(where(is.numeric), \(x) round(x, 3))) |>
+  kable()
+```
+
+Ratios, branch relative to main. Above 1 is slower.
+
+```{r}
+#| label: time-ratio
+results |>
+  group_by(model, label) |>
+  summarise(
+    build = median(build_secs),
+    mcmc = median(mcmc_secs),
+    .groups = "drop"
+  ) |>
+  pivot_wider(names_from = label, values_from = c(build, mcmc)) |>
+  transmute(
+    model,
+    build_ratio = round(`build_data-variables` / build_main, 2),
+    mcmc_ratio = round(`mcmc_data-variables` / mcmc_main, 2)
+  ) |>
+  kable()
+```
+
+## Memory
+
+RSS deltas in MB: at dag construction, where the variables are created, and
+across sampling. Total is what the process actually grew by.
+
+```{r}
+#| label: memory
+results |>
+  group_by(model, label) |>
+  summarise(
+    build_mb = median(build_delta_mb),
+    mcmc_mb = median(mcmc_delta_mb),
+    total_mb = median(build_delta_mb + mcmc_delta_mb),
+    .groups = "drop"
+  ) |>
+  pivot_wider(
+    names_from = label,
+    values_from = c(build_mb, mcmc_mb, total_mb)
+  ) |>
+  mutate(across(where(is.numeric), \(x) round(x, 1))) |>
+  kable()
+```
+
+## Is the spread small enough to read these?
+
+Min and max across reps, so a ratio computed from medians can be judged against
+the noise it sits in.
+
+```{r}
+#| label: spread
+results |>
+  group_by(model, label) |>
+  summarise(
+    mcmc_min = round(min(mcmc_secs), 2),
+    mcmc_max = round(max(mcmc_secs), 2),
+    total_mb_min = round(min(build_delta_mb + mcmc_delta_mb), 1),
+    total_mb_max = round(max(build_delta_mb + mcmc_delta_mb), 1),
+    .groups = "drop"
+  ) |>
+  kable()
+```
