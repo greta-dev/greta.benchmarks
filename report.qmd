@@ -1,0 +1,301 @@
+---
+title: "greta benchmark suite"
+format:
+  html:
+    toc: true
+    toc-depth: 2
+    embed-resources: true
+    fig-width: 8
+bibliography: references.bib
+execute:
+  echo: false
+  warning: false
+  message: false
+---
+
+```{r}
+#| label: setup
+source("packages.R")
+tar_source()
+
+tar_load(c(
+  timings,
+  timings_relative,
+  sampling,
+  pooled_posterior,
+  posterior_comparison,
+  agreement,
+  rss,
+  shas,
+  reference,
+  under_test,
+  target_ess
+))
+
+ratio <- timings_relative |>
+  select(example, task, branch, ms) |>
+  pivot_wider(names_from = branch, values_from = ms) |>
+  mutate(ratio = .data[[under_test]] / .data[[reference]])
+```
+
+**`{r} under_test`** against **`{r} reference`**.
+
+```{r}
+#| label: shas
+shas |>
+  mutate(role = c("reference", "under test"), sha = substr(sha, 1, 10)) |>
+  select(role, branch, sha) |>
+  kable()
+```
+
+# Summary
+
+## 1. Is it faster?
+
+`model()` and `opt()` are deterministic, so every iteration is the same work
+and the distribution of iteration times is the measurement. The minimum is the
+robust estimator for timing, because timing noise is one-sided
+[@chen2016].
+
+```{r}
+#| label: fig-speed
+#| fig-cap: "Every timed iteration. Each row is a task, each column a branch. Clouds sitting further right are slower."
+#| fig-height: 5
+autoplot(timings) +
+  facet_grid(example ~ branch, scales = "free_x") +
+  theme_minimal(base_size = 10) +
+  theme(legend.position = "bottom")
+```
+
+```{r}
+#| label: speed-ratio
+ratio |>
+  transmute(
+    example,
+    task,
+    reference = round(.data[[reference]], 1),
+    under_test = round(.data[[under_test]], 1),
+    ratio = round(ratio, 2),
+    direction = if_else(ratio > 1, "slower", "faster")
+  ) |>
+  kable(
+    col.names = c(
+      "example",
+      "task",
+      paste(reference, "(ms)"),
+      paste(under_test, "(ms)"),
+      "ratio",
+      ""
+    )
+  )
+```
+
+## 2. Does it sample more efficiently?
+
+Seconds to reach a minimum bulk-ESS of `{r} target_ess`. Quality is held
+fixed and cost is measured, so there is no convergence gate discarding runs -
+a branch that cannot reach the target appears as `hit_cap` rather than
+vanishing.
+
+```{r}
+#| label: fig-sampling
+#| fig-cap: "Seconds of sampling per 1000 effective draws. Lower is better."
+#| fig-height: 3.5
+sampling |>
+  ggplot(aes(x = seconds_per_1000_ess, y = example, fill = branch)) +
+  geom_col(position = position_dodge(preserve = "single"), width = 0.7) +
+  labs(x = "seconds per 1000 effective draws", y = NULL, fill = NULL) +
+  theme_minimal(base_size = 10) +
+  theme(legend.position = "bottom")
+```
+
+### Memory
+
+End-of-run resident set size - the physical RAM the measuring process held,
+not residual sum of squares. `bench`'s `mem_alloc` is deliberately not used:
+it comes from `Rprofmem` and sees the R heap only, while greta's memory lives
+in the TensorFlow graph on the Python side.
+
+```{r}
+#| label: rss
+rss |>
+  mutate(rss_mb = round(rss_mb)) |>
+  kable(col.names = c("branch", "RSS (MB)"))
+```
+
+## 3. Does it give the same answer?
+
+The question a timing cannot answer: two branches can both converge, both be
+fast, and disagree about the estimate. Posterior means always differ a little
+between runs, so the comparison is in **Monte Carlo standard error units**
+rather than raw differences [@vehtari2021; @magnusson2025]:
+
+$$z = \frac{\bar\theta_{\text{test}} - \bar\theta_{\text{ref}}}{\sqrt{\text{mcse}^2_{\text{test}} + \text{mcse}^2_{\text{ref}}}}$$
+
+```{r}
+#| label: fig-agreement
+#| fig-cap: "Every variable's difference in means, in MCSE units. Inside the shaded band the branches agree to within the precision either of them has."
+#| fig-height: 3
+ggplot(posterior_comparison, aes(x = z_mean, y = example)) +
+  annotate(
+    "rect",
+    xmin = -4,
+    xmax = 4,
+    ymin = -Inf,
+    ymax = Inf,
+    fill = "grey88"
+  ) +
+  geom_vline(xintercept = 0, colour = "grey40") +
+  stat_dots(side = "both", scale = 0.6) +
+  labs(x = "difference in means (MCSE units)", y = NULL) +
+  theme_minimal(base_size = 10)
+```
+
+```{r}
+#| label: agreement-table
+agreement |>
+  mutate(max_abs_z = round(max_abs_z, 2)) |>
+  kable(
+    col.names = c(
+      "example",
+      "variables",
+      "largest |z|",
+      "disagreeing",
+      "worst variable",
+      "verdict"
+    )
+  )
+```
+
+# Details
+
+::: panel-tabset
+
+## Timings
+
+```{r}
+#| label: timings-detail
+timings_relative |>
+  mutate(ms = round(ms, 1), relative = round(relative, 3)) |>
+  pivot_wider(names_from = branch, values_from = c(ms, relative)) |>
+  kable()
+```
+
+## Sampling
+
+```{r}
+#| label: sampling-detail
+sampling |>
+  select(
+    branch,
+    example,
+    rep,
+    elapsed,
+    mcmc_samples,
+    ess_bulk_min,
+    ess_bulk_median,
+    rhat_max,
+    n_variables,
+    hit_cap
+  ) |>
+  mutate(across(where(is.numeric), \(x) round(x, 2))) |>
+  kable()
+```
+
+A single run gives a zero-width interval, which cannot overlap anything, so
+the replicate count decides the verdict before the intervals get a say. `quick`
+and `standard` run one replicate and will always say so; only `thorough` can
+resolve a sampling speed difference.
+
+```{r}
+#| label: sampling-resolution
+sampling |>
+  filter(!hit_cap) |>
+  group_by(example, branch) |>
+  summarise(
+    mid = median(seconds_per_1000_ess),
+    lo = min(seconds_per_1000_ess),
+    hi = max(seconds_per_1000_ess),
+    n = n(),
+    .groups = "drop"
+  ) |>
+  pivot_wider(names_from = branch, values_from = c(mid, lo, hi, n)) |>
+  rename_with(\(nm) sub(paste0("_", under_test, "$"), "_test", nm)) |>
+  rename_with(\(nm) sub(paste0("_", reference, "$"), "_ref", nm)) |>
+  mutate(
+    ratio = round(mid_test / mid_ref, 2),
+    runs = pmin(n_test, n_ref),
+    verdict = case_when(
+      runs < 2 ~ "too few runs to say",
+      lo_test > hi_ref | hi_test < lo_ref ~ "resolved",
+      .default = "unresolved"
+    )
+  ) |>
+  select(example, ratio, runs, verdict) |>
+  kable()
+```
+
+## Posteriors
+
+The marginal for every variable, both branches overlaid. Intervals sitting on
+top of each other are the expected result.
+
+```{r}
+#| label: fig-intervals
+#| fig-height: 7
+pooled_posterior |>
+  group_by(example) |>
+  slice_max(q95 - q5, n = 6) |>
+  ungroup() |>
+  ggplot(aes(y = variable, colour = branch)) +
+  geom_pointinterval(
+    aes(x = mean, xmin = q5, xmax = q95),
+    position = position_dodge(width = 0.5)
+  ) +
+  facet_wrap(~example, scales = "free", ncol = 2) +
+  labs(x = NULL, y = NULL, colour = NULL) +
+  theme_minimal(base_size = 10) +
+  theme(legend.position = "bottom")
+```
+
+## Provenance
+
+```{r}
+#| label: provenance
+str(tar_read(provenance))
+```
+
+:::
+
+# Methods
+
+**Diagnostics.** Rank-normalised split-R̂ and bulk/tail effective sample size,
+with R̂ < 1.01 and ESS > 400 as reference thresholds [@vehtari2021]. ESS > 400
+is where the diagnostics become trustworthy, not where accuracy becomes
+sufficient. `coda::effectiveSize()` is deliberately not used: it fits an AR
+model per chain with no between-chain information, so it reports a large ESS
+for chains stuck in different modes.
+
+**Comparing posteriors.** Differences in posterior means are divided by the
+combined Monte Carlo standard error, so bias is separable from Monte Carlo
+noise [@magnusson2025]. A two-sample Kolmogorov-Smirnov test on the draws
+would be wrong here: it assumes both samples are iid, and MCMC draws are
+autocorrelated, so a correct sampler is rejected too often [@talts2018].
+
+**Timing.** Timing noise is one-sided, so the minimum is the robust estimator
+[@chen2016]. Effect-size intervals are reported rather than significance tests
+[@kalibera2013]; a ratio whose spread is wider than the effect is labelled
+unresolved rather than quoted.
+
+**What is not measured.** Gradient evaluations are not counted, so a change can
+be attributed to wall time but not to "needs fewer gradients" versus "each
+gradient got cheaper" [@hoffman2021]. There is no external reference posterior,
+so a bug present in both branches would pass unnoticed; posteriordb
+[@magnusson2025] and Inference Gym are the obvious sources if that becomes
+worth closing. `rhat_nested()` [@margossian2025] would be the right diagnostic
+if greta's chains were ever run many-and-short.
+
+# References
+
+::: {#refs}
+:::
