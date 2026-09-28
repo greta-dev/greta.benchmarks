@@ -1,0 +1,79 @@
+---
+title: "Rounding error in chol2symm(chol(x))"
+format:
+  gfm: default
+  html: default
+execute:
+  echo: false
+  warning: false
+  message: false
+---
+
+```{r}
+#| label: setup
+library(here)
+library(fs)
+
+run_dir <- here("2026-09-28-chol2symm-tolerance-i842")
+results_rds <- path(run_dir, "results.rds")
+if (!file_exists(results_rds)) {
+  stop(
+    "no results.rds - run 2026-09-28-chol2symm-tolerance-i842/01-measure.R first",
+    call. = FALSE
+  )
+}
+raw <- readRDS(results_rds)
+results <- raw$results
+r <- results[results$side == "r", ]
+g <- results[results$side == "greta", ]
+
+pct <- function(x) paste0(formatC(100 * mean(x), format = "f", digits = 1), "%")
+sci <- function(x) formatC(x, format = "e", digits = 1)
+```
+
+## The question
+
+greta's "chol2symm inverts chol" test rebuilt a 9 x 9 Wishart matrix from its
+Cholesky factor and compared at `tolerance = .Machine$double.eps`
+(`r sci(raw$tolerances[["eps"]])`). It failed on Windows CI for greta #842 with
+differences in the last digit. Is that tolerance tighter than the rounding error
+of the rebuild itself, and what tolerance is safe?
+
+## Results
+
+`all.equal()` compares the mean relative difference over the elements that
+differ against its tolerance, leaving out elements that match exactly. That is
+the error below, taken from `all.equal(giveErr = TRUE)`.
+
+```{r}
+#| label: consistency
+# the recorded error has to agree with the recorded failures, or it is the
+# wrong statistic
+stopifnot(
+  identical(results$fails_eps, results$error > raw$tolerances[["eps"]]),
+  identical(results$fails_fixed, results$error > raw$tolerances[["fixed"]])
+)
+```
+
+| | draws | largest error | fails at `double.eps` | fails at `1e-12` |
+|---|---|---|---|---|
+| `chol2symm()` in R | `r nrow(r)` | `r sci(max(r$error))` | `r pct(r$fails_eps)` | `r pct(r$fails_fixed)` |
+| greta `calculate()` | `r nrow(g)` | `r sci(max(g$error))` | `r pct(g$fails_eps)` | `r pct(g$fails_fixed)` |
+
+The largest rounding error across all draws is
+`r sci(max(results$error))`, so `.Machine$double.eps` fails on ordinary
+rounding alone. A tolerance of `1e-12` leaves a margin of
+`r formatC(1e-12 / max(results$error), format = "d", big.mark = ",")` times
+over the largest error seen, while a real bug in `chol2symm()` - a transpose, a
+wrong triangle - gives errors of order 1.
+
+## Environment
+
+greta at `r raw$greta_sha`.
+
+```{r}
+#| label: environment
+#| results: asis
+source(here("R", "provenance.R"))
+cat(format_provenance(raw$provenance), sep = "\n")
+```
