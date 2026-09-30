@@ -29,8 +29,12 @@ tar_load(c(
   shas,
   reference,
   under_test,
-  target_ess
+  target_ess,
+  fit_draws,
+  fitted_values
 ))
+
+example_names <- unique(fit_draws$example)
 
 ratio <- timings_relative |>
   select(example, task, branch, ms) |>
@@ -38,32 +42,43 @@ ratio <- timings_relative |>
   mutate(ratio = .data[[under_test]] / .data[[reference]])
 ```
 
-**`{r} under_test`** against **`{r} reference`**.
+Two **methods** are compared throughout: a reference and the one under test.
+Here they are git branches of greta, but nothing below depends on that - they
+are simply two versions of the same code measured on the same machine, in the
+same session, against the same examples.
 
 ```{r}
 #| label: shas
 shas |>
   mutate(role = c("reference", "under test"), sha = substr(sha, 1, 10)) |>
   select(role, branch, sha) |>
-  kable()
+  kable(col.names = c("role", "git branch", "commit"))
 ```
 
 # Summary
 
 ## 1. Is it faster?
 
-`model()` and `opt()` are deterministic, so every iteration is the same work
-and the distribution of iteration times is the measurement. The minimum is the
-robust estimator for timing, because timing noise is one-sided
-[@chen2016].
+`model()`, `opt()` and a fixed-length `mcmc()` are deterministic - every
+iteration is the same work - so the distribution of iteration times is the
+measurement. The minimum is the robust estimator for timing, because timing
+noise is one-sided [@chen2016].
+
+`mcmc` here is 1000 warmup and 1000 samples across 4 chains on 4 cores, which
+is greta's default shape. A fixed iteration count
+is the only way to ask whether one iteration got more expensive: the sampling
+tier below lets the number of draws float until it reaches a quality target, so
+its wall time confounds per-iteration cost with how well the chain happened to
+mix.
 
 ```{r}
 #| label: fig-speed
-#| fig-cap: "Every timed iteration. Each row is a task, each column a branch. Clouds sitting further right are slower."
+#| fig-cap: "Every timed iteration, one row per method. The two rows in a panel do identical work, so the one further right is slower. Panels are different tasks and examples, which are not comparable with each other - only the two rows within a panel are."
 #| fig-height: 5
 autoplot(timings) +
-  facet_grid(example ~ branch, scales = "free_x") +
-  theme_minimal(base_size = 10) +
+  aes(y = branch) +
+  facet_grid(example ~ task, scales = "free_x") +
+  labs(y = NULL) +
   theme(legend.position = "bottom")
 ```
 
@@ -92,21 +107,22 @@ ratio |>
 
 ## 2. Does it sample more efficiently?
 
-Seconds to reach a minimum bulk-ESS of `{r} target_ess`. Quality is held
-fixed and cost is measured, so there is no convergence gate discarding runs -
-a branch that cannot reach the target appears as `hit_cap` rather than
+Seconds to reach a minimum bulk-ESS of `{r} target_ess` - a different question
+from the fixed-length `mcmc` above, which measures per-iteration cost. Quality
+is held fixed and cost is measured, so there is no convergence gate discarding runs -
+a method that cannot reach the target appears as `hit_cap` rather than
 vanishing.
 
 ```{r}
 #| label: fig-sampling
-#| fig-cap: "Seconds of sampling per 1000 effective draws. Lower is better."
+#| fig-cap: "Seconds of sampling per 1000 effective draws, one bar per method. Lower is better. Each panel is one example; the comparison is between the two bars within a panel."
 #| fig-height: 3.5
 sampling |>
-  ggplot(aes(x = seconds_per_1000_ess, y = example, fill = branch)) +
-  geom_col(position = position_dodge(preserve = "single"), width = 0.7) +
-  labs(x = "seconds per 1000 effective draws", y = NULL, fill = NULL) +
-  theme_minimal(base_size = 10) +
-  theme(legend.position = "bottom")
+  ggplot(aes(x = seconds_per_1000_ess, y = branch, fill = branch)) +
+  geom_point(aes(colour = branch)) +
+  facet_wrap(~example, ncol = 2, scales = "free_x") 
+  labs(x = "seconds per 1000 effective draws", y = NULL) +
+  theme_minimal(base_size = 10)
 ```
 
 ### Memory
@@ -120,12 +136,12 @@ in the TensorFlow graph on the Python side.
 #| label: rss
 rss |>
   mutate(rss_mb = round(rss_mb)) |>
-  kable(col.names = c("branch", "RSS (MB)"))
+  kable(col.names = c("method", "RSS (MB)"))
 ```
 
 ## 3. Does it give the same answer?
 
-The question a timing cannot answer: two branches can both converge, both be
+The question a timing cannot answer: two methods can both converge, both be
 fast, and disagree about the estimate. Posterior means always differ a little
 between runs, so the comparison is in **Monte Carlo standard error units**
 rather than raw differences [@vehtari2021; @magnusson2025]:
@@ -134,7 +150,7 @@ $$z = \frac{\bar\theta_{\text{test}} - \bar\theta_{\text{ref}}}{\sqrt{\text{mcse
 
 ```{r}
 #| label: fig-agreement
-#| fig-cap: "Every variable's difference in means, in MCSE units. Inside the shaded band the branches agree to within the precision either of them has."
+#| fig-cap: "Every variable's difference in means, in MCSE units. Inside the shaded band the two methods agree to within the precision either of them has."
 #| fig-height: 3
 ggplot(posterior_comparison, aes(x = z_mean, y = example)) +
   annotate(
@@ -167,6 +183,52 @@ agreement |>
   )
 ```
 
+## 4. What do the fits look like?
+
+One seeded run of each example on each branch: 4 chains of 1000 warmup and
+1000 samples. The plots put the branches side by side, so a difference in how
+a model samples or what it estimates shows as a difference between panels.
+
+### Fitted values against the data
+
+The fitted values are each model's expected value for the data, such as the
+regression line, not new data simulated from the model. The ribbons are 50%,
+80% and 95% intervals; the points and crosses are the data.
+
+```{r}
+#| label: fig-fits
+#| fig-height: 4
+for (example_name in example_names) {
+  print(gg_fit(fitted_values, example_name))
+}
+```
+
+### Posterior densities
+
+The first eight variables of each example, as densities with their median and
+66% and 95% intervals, one row per branch.
+
+```{r}
+#| label: fig-densities
+#| fig-height: 4.5
+for (example_name in example_names) {
+  print(gg_densities(fit_draws, example_name))
+}
+```
+
+### Trace plots
+
+The first six variables of each example, each chain in its own colour. Chains
+that overlap and wander around a common level are what mixing looks like.
+
+```{r}
+#| label: fig-traces
+#| fig-height: 6
+for (example_name in example_names) {
+  print(gg_traces(fit_draws, example_name))
+}
+```
+
 # Details
 
 ::: panel-tabset
@@ -178,6 +240,7 @@ agreement |>
 timings_relative |>
   mutate(ms = round(ms, 1), relative = round(relative, 3)) |>
   pivot_wider(names_from = branch, values_from = c(ms, relative)) |>
+  rename_with(\(nm) sub("^ms_", "ms: ", sub("^relative_", "relative: ", nm))) |>
   kable()
 ```
 
@@ -199,6 +262,7 @@ sampling |>
     hit_cap
   ) |>
   mutate(across(where(is.numeric), \(x) round(x, 2))) |>
+  rename(method = branch) |>
   kable()
 ```
 
@@ -237,7 +301,7 @@ sampling |>
 
 ## Posteriors
 
-The marginal for every variable, both branches overlaid. Intervals sitting on
+The marginal for every variable, both methods overlaid. Intervals sitting on
 top of each other are the expected result.
 
 ```{r}
@@ -290,7 +354,7 @@ unresolved rather than quoted.
 **What is not measured.** Gradient evaluations are not counted, so a change can
 be attributed to wall time but not to "needs fewer gradients" versus "each
 gradient got cheaper" [@hoffman2021]. There is no external reference posterior,
-so a bug present in both branches would pass unnoticed; posteriordb
+so a bug present in both methods would pass unnoticed; posteriordb
 [@magnusson2025] and Inference Gym are the obvious sources if that becomes
 worth closing. `rhat_nested()` [@margossian2025] would be the right diagnostic
 if greta's chains were ever run many-and-short.

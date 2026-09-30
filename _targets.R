@@ -19,6 +19,7 @@ tar_assign({
   settings <- tier_settings(tier) |> tar_target()
   example_names <- settings$examples |> tar_target()
   bench_iterations <- settings$bench_iterations |> tar_target()
+  mcmc_iterations <- settings$mcmc_iterations |> tar_target()
   target_ess <- settings$target_ess |> tar_target()
   reps <- settings$reps |> tar_target()
   time_limit <- settings$time_limit |> tar_target()
@@ -26,7 +27,7 @@ tar_assign({
   # greta and greta.benchmarks are assumed to share a parent directory
   greta_repo <- path(path_dir(here()), "greta") |> tar_target()
 
-  branches <- c("main", "data-interface-into-log-prob-739") |> tar_target()
+  branches <- c("main", "faster-hessians-i546") |> tar_target()
   reference <- branches[[1]] |> tar_target()
   under_test <- branches[[2]] |> tar_target()
   shas <- branch_shas(branches, greta_repo) |> tar_target()
@@ -43,6 +44,7 @@ tar_assign({
     target_file,
     greta_repo,
     bench_iterations,
+    mcmc_iterations,
     target_ess,
     reps,
     time_limit,
@@ -53,6 +55,10 @@ tar_assign({
   timings <- branch_timings(measured) |> tar_target()
   sampling <- branch_sampling(measured) |> tar_target()
   rss <- branch_rss(measured) |> tar_target()
+
+  fits <- branch_fits(measured) |> tar_target()
+  fit_draws <- tidy_fit_draws(fits) |> tar_target()
+  fitted_values <- tidy_fitted(fits) |> tar_target()
 
   # bench normalises against the single fastest row in whatever it is given, so
   # relative medians are computed per example x task - where the branch is the

@@ -18,6 +18,32 @@
 # part of the stack it exercises that the others do not. Check its posterior
 # geometry too - see the note on `linear`.
 
+# Attach what the report needs to draw a model's fit against its data: the
+# greta array of fitted values, the observed data they predict, and the
+# predictor and grouping to plot them against. `observed` is NULL for a model
+# whose fitted values have no direct data to compare with. `style` is "curve"
+# for a continuous predictor, and "interval" for one fitted value per discrete
+# unit, such as a school or an occasion.
+with_fit <- function(
+  model,
+  fitted,
+  observed = NULL,
+  x = NULL,
+  group = NULL,
+  x_label = NULL,
+  style = c("curve", "interval")
+) {
+  attr(model, "fit") <- list(
+    fitted = fitted,
+    observed = observed,
+    x = x,
+    group = group,
+    x_label = x_label,
+    style = match.arg(style)
+  )
+  model
+}
+
 bench_examples <- function() {
   list(
     # inst/examples/linear.Rmd - the cheapest real model, a floor for
@@ -35,7 +61,13 @@ bench_examples <- function() {
       sd <- cauchy(0, 3, truncation = c(0, Inf))
       mu <- int + coef * attitude$complaints
       distribution(attitude$rating) <- normal(mu, sd)
-      model(int, coef, sd)
+      with_fit(
+        model(int, coef, sd),
+        fitted = mu,
+        observed = attitude$rating,
+        x = attitude$complaints,
+        x_label = "complaints"
+      )
     },
 
     # inst/examples/multiple_linear.Rmd - matrix multiply in the gradient
@@ -46,7 +78,11 @@ bench_examples <- function() {
       sd <- cauchy(0, 3, truncation = c(0, Inf))
       mu <- int + design %*% coefs
       distribution(attitude$rating) <- normal(mu, sd)
-      model(int, coefs, sd)
+      with_fit(
+        model(int, coefs, sd),
+        fitted = mu,
+        observed = attitude$rating
+      )
     },
 
     # inst/examples/hierarchical_linear.Rmd - rbind and integer indexing, which
@@ -61,7 +97,14 @@ bench_examples <- function() {
       species_id <- as.numeric(iris$Species)
       mu <- int + coef * iris$Sepal.Width + species_effect[species_id]
       distribution(iris$Sepal.Length) <- normal(mu, sd)
-      model(int, coef, sd, species_sd, species_offset)
+      with_fit(
+        model(int, coef, sd, species_sd, species_offset),
+        fitted = mu,
+        observed = iris$Sepal.Length,
+        x = iris$Sepal.Width,
+        group = iris$Species,
+        x_label = "Sepal.Width"
+      )
     },
 
     # inst/examples/eight_schools.Rmd - the funnel.
@@ -82,7 +125,14 @@ bench_examples <- function() {
       xi <- normal(0, 5)
       theta <- mu_theta + xi * eta
       distribution(y) <- normal(theta, sigma_y)
-      model(sigma_eta, eta, mu_theta, xi)
+      with_fit(
+        model(sigma_eta, eta, mu_theta, xi),
+        fitted = theta,
+        observed = y,
+        x = seq_len(N),
+        x_label = "school",
+        style = "interval"
+      )
     },
 
     # inst/examples/cjs.Rmd - the deep graph.
@@ -140,7 +190,15 @@ bench_examples <- function() {
         chi[final_obs[not_seen_last]]
       )
 
-      model(phi, p)
+      # survival has no observed value to set it against, so it is plotted
+      # by occasion on its own
+      with_fit(
+        model(phi, p),
+        fitted = phi,
+        x = seq_len(n_time),
+        x_label = "occasion",
+        style = "interval"
+      )
     }
   )
 }

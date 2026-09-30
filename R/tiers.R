@@ -74,6 +74,7 @@ tier_settings <- function(tier = c("quick", "standard", "thorough")) {
       target_ess = 200,
       reps = 1,
       bench_iterations = 10,
+      mcmc_iterations = 5,
       time_limit = 120
     ),
     standard = list(
@@ -87,6 +88,7 @@ tier_settings <- function(tier = c("quick", "standard", "thorough")) {
       target_ess = 500,
       reps = 1,
       bench_iterations = 30,
+      mcmc_iterations = 10,
       time_limit = 300
     ),
     thorough = list(
@@ -100,6 +102,7 @@ tier_settings <- function(tier = c("quick", "standard", "thorough")) {
       target_ess = 1000,
       reps = 3,
       bench_iterations = 50,
+      mcmc_iterations = 20,
       time_limit = 600
     )
   )
