@@ -7,6 +7,5 @@
 _targets/
 report.html
 report_files/
-*.rds
 */results_files/*
 *.html
