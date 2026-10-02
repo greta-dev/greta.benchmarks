@@ -96,6 +96,45 @@ comparison.
   runs in a subprocess and cannot see this session. Closing over a variable
   looks like it works and fails at run time.
 
+### Compare against the CRAN release
+
+Unless a question needs something else, the reference is greta's current CRAN
+release, by its git tag (`v0.6.0` now; `branches` in `_targets.R`), not
+`main`. Users upgrade from CRAN, so an improvement is what a branch changes
+against the release they have. {cross} installs a tag the same way as a
+branch, and `git_sha()` resolves either to its commit.
+
+Say so when a run compares against something else, such as `main` for the
+effect of one PR on its own, and why.
+
+### Compare at equal iterations
+
+Every `mcmc()` comparison gives each version the same number of iterations,
+not the same arguments. greta 0.6.0 and main before #850 run `thin + 1`
+iterations per draw, so `warmup = 1000, n_samples = 1000` is 2000 and 2000
+iterations there and 1000 and 1000 after #850. The same arguments made #850
+look 25% faster and less efficient, and both were the difference in work
+(`2026-10-01-iterations-and-efficiency-i318/`). The pipeline measures each
+version's iterations per draw with `iterations_per_draw()` and divides by it.
+
+### Show every run
+
+Give a summary's minimum and maximum beside its median, and plot every run
+rather than only the summary: one version's ESS varied 30-fold across seeds,
+which a table of medians hides. In a write-up (`results.qmd`, `report.qmd`):
+
+- Results bigger than 3 rows by 3 columns get considered for a plot.
+- A table that a plot already shows goes under it in a collapsible panel,
+  `<details><summary>Table of ...</summary>`, which works in the html and on
+  GitHub. A table with no plot stays visible.
+- Every run is a small dot and the mean a large dot, said in the caption. No
+  crosses: their meaning is not obvious.
+- One value per group is a bar, `geom_col(position = "dodge")`; dots and a
+  mean only when there are several runs.
+- Every model is defined in LaTeX and in its greta code, with a sentence on
+  what it is. The code is written out in the document and checked against
+  `R/examples.R` with `check_shown_code()`.
+
 ### Choosing what to measure
 
 - **Match the metric to the change.** Wall time for work removed. Effective

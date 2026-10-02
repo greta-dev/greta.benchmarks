@@ -1,5 +1,5 @@
 ---
-title: "greta benchmark suite"
+title: "Greta benchmark suite"
 format:
   html:
     toc: true
@@ -7,6 +7,9 @@ format:
     embed-resources: true
     fig-width: 8
 bibliography: references.bib
+params:
+  store: "_targets"
+  further: ""
 execute:
   echo: false
   warning: false
@@ -18,140 +21,412 @@ execute:
 source("packages.R")
 tar_source()
 
-tar_load(c(
-  timings,
-  timings_relative,
-  sampling,
-  pooled_posterior,
-  posterior_comparison,
-  agreement,
-  rss,
-  shas,
-  reference,
-  under_test,
-  target_ess,
-  fit_draws,
-  fitted_values
+tar_load(
+  c(
+    shas,
+    comparisons,
+    tier,
+    example_names,
+    target_ess,
+    bench_iterations,
+    mcmc_iterations,
+    warmup_iterations,
+    sample_iterations,
+    mcmc_chains,
+    mcmc_cores,
+    opt_iterations,
+    iterations,
+    timings,
+    speed,
+    sampling,
+    sampling_speed,
+    rss,
+    posterior_comparison,
+    agreement,
+    pooled_posterior,
+    fit_draws,
+    fitted_values,
+    fit_diagnostics,
+    provenance
+  ),
+  store = params$store
+)
+
+versions <- shas$label
+every_repeat <- timed_repeats(timings)
+
+check_shown_code(c(
+  linear = "code-linear",
+  multiple_linear = "code-multiple-linear",
+  hierarchical_linear = "code-hierarchical-linear",
+  eight_schools = "code-eight-schools",
+  cjs = "code-cjs"
 ))
-
-example_names <- unique(fit_draws$example)
-
-ratio <- timings_relative |>
-  select(example, task, branch, ms) |>
-  pivot_wider(names_from = branch, values_from = ms) |>
-  mutate(ratio = .data[[under_test]] / .data[[reference]])
 ```
 
-Two **methods** are compared throughout: a reference and the one under test.
-Here they are git branches of greta, but nothing below depends on that - they
-are simply two versions of the same code measured on the same machine, in the
-same session, against the same examples.
+This report compares versions of greta, measured on one machine, at the `{r} tier` tier. Every number in it is read from the targets store `{r} params$store`. The first version listed is the reference.
 
 ```{r}
-#| label: shas
+#| label: versions
 shas |>
-  mutate(role = c("reference", "under test"), sha = substr(sha, 1, 10)) |>
-  select(role, branch, sha) |>
-  kable(col.names = c("role", "git branch", "commit"))
+  mutate(
+    sha = substr(sha, 1, 10),
+    iterations_per_draw = iterations$iterations_per_draw[
+      match(label, iterations$branch)
+    ]
+  ) |>
+  kable(
+    col.names = c("version", "git ref", "commit", "iterations per draw")
+  )
 ```
 
-# Summary
+`mcmc()` takes a number of draws, and versions of greta can run different numbers of iterations per draw: greta 0.6.0 runs two at `thin = 1`. Each version's iterations per draw is measured (`R/iterations.R`), and every `mcmc()` call is given the number of draws that makes the same number of iterations on every version.
 
-## 1. Is it faster?
+For each model, each version is measured on:
 
-`model()`, `opt()` and a fixed-length `mcmc()` are deterministic - every
-iteration is the same work - so the distribution of iteration times is the
-measurement. The minimum is the robust estimator for timing, because timing
-noise is one-sided [@chen2016].
+1. **Speed:** the time `model()`, `opt()`, and an `mcmc()` run of a fixed number of iterations take.
+2. **Efficiency:** the time `mcmc()` takes to reach a target effective sample size.
+3. **Agreement:** the difference between versions' posterior means, in Monte Carlo standard errors.
+4. **Convergence:** R-hat and effective sample size of one seeded fit.
 
-`mcmc` here is 1000 warmup and 1000 samples across 4 chains on 4 cores, which
-is greta's default shape. A fixed iteration count
-is the only way to ask whether one iteration got more expensive: the sampling
-tier below lets the number of draws float until it reaches a quality target, so
-its wall time confounds per-iteration cost with how well the chain happened to
-mix.
+Section 5 plots each model's fitted values and posterior densities, and section 6 holds any measurements particular to this run. Every `mcmc()` call uses `hmc()`, greta's default sampler.
+
+This report compares versions with each other. Whether a version's answers are correct is tested in greta itself, in `tests/testthat/test_posteriors_*.R`: each sampler's draws are compared with draws taken from the distribution directly, and Geweke tests check that alternating between sampling a model's parameters and simulating its data keeps their joint distribution.
+
+# The models
+
+Each model is defined in maths and in greta code, and comes from greta's `inst/examples/`. Normal and log-normal distributions are written with their mean and standard deviation, as greta's `normal()` and `lognormal()` take them; $\text{Cauchy}^{+}$ is a Cauchy truncated to positive values. A model's parameter count is the number of values `mcmc()` returns for it.
+
+## linear
+
+A regression of each department's rating in `attitude` on its number of complaints. `{r} parameter_text(fit_draws, "linear", tier)`
+
+$$
+\begin{aligned}
+\text{rating}_i &\sim \text{Normal}(\mu_i, \sigma), \quad i = 1, \dots, 30 \\
+\mu_i &= \alpha + \beta \, \text{complaints}_i \\
+\alpha, \beta &\sim \text{Normal}(0, 10) \\
+\sigma &\sim \text{Cauchy}^{+}(0, 3)
+\end{aligned}
+$$
+
+```{r}
+#| label: code-linear
+#| echo: true
+#| eval: false
+int <- normal(0, 10)
+coef <- normal(0, 10)
+sd <- cauchy(0, 3, truncation = c(0, Inf))
+mu <- int + coef * attitude$complaints
+distribution(attitude$rating) <- normal(mu, sd)
+m <- model(int, coef, sd)
+```
+
+## multiple_linear
+
+The same rating on all six of `attitude`'s other columns, $X$, through a matrix multiply. `{r} parameter_text(fit_draws, "multiple_linear", tier)`
+
+$$
+\begin{aligned}
+\text{rating}_i &\sim \text{Normal}(\mu_i, \sigma), \quad i = 1, \dots, 30 \\
+\mu_i &= \alpha + \sum_{j = 1}^{6} X_{ij} \, \beta_j \\
+\alpha, \beta_j &\sim \text{Normal}(0, 10) \\
+\sigma &\sim \text{Cauchy}^{+}(0, 3)
+\end{aligned}
+$$
+
+```{r}
+#| label: code-multiple-linear
+#| echo: true
+#| eval: false
+design <- as.matrix(attitude[, 2:7])
+int <- normal(0, 10)
+coefs <- normal(0, 10, dim = ncol(design))
+sd <- cauchy(0, 3, truncation = c(0, Inf))
+mu <- int + design %*% coefs
+distribution(attitude$rating) <- normal(mu, sd)
+m <- model(int, coefs, sd)
+```
+
+## hierarchical_linear
+
+Sepal length on sepal width in `iris`, with an offset for each species, $s[i]$ being flower $i$'s. Setosa's offset is zero and the other two share a scale, $\tau$. The offsets are indexed with `rbind()` and integer indexing. `{r} parameter_text(fit_draws, "hierarchical_linear", tier)`
+
+$$
+\begin{aligned}
+\text{Sepal.Length}_i &\sim \text{Normal}(\mu_i, \sigma), \quad i = 1, \dots, 150 \\
+\mu_i &= \alpha + \beta \, \text{Sepal.Width}_i + \gamma_{s[i]} \\
+\gamma_1 &= 0, \qquad \gamma_2, \gamma_3 \sim \text{Normal}(0, \tau) \\
+\tau &\sim \text{LogNormal}(0, 1) \\
+\alpha, \beta &\sim \text{Normal}(0, 10) \\
+\sigma &\sim \text{Cauchy}^{+}(0, 3)
+\end{aligned}
+$$
+
+```{r}
+#| label: code-hierarchical-linear
+#| echo: true
+#| eval: false
+int <- normal(0, 10)
+coef <- normal(0, 10)
+sd <- cauchy(0, 3, truncation = c(0, Inf))
+species_sd <- lognormal(0, 1)
+species_offset <- normal(0, species_sd, dim = 2)
+species_effect <- rbind(0, species_offset)
+species_id <- as.numeric(iris$Species)
+mu <- int + coef * iris$Sepal.Width + species_effect[species_id]
+distribution(iris$Sepal.Length) <- normal(mu, sd)
+m <- model(int, coef, sd, species_sd, species_offset)
+```
+
+## eight_schools
+
+The effect of coaching in eight schools, $y_j$, each measured with a known standard error, $\sigma_j$. The scale of the school effects, $\sigma_\eta$, is itself a parameter, which makes the posterior a funnel. `{r} parameter_text(fit_draws, "eight_schools", tier)`
+
+$$
+\begin{aligned}
+y_j &\sim \text{Normal}(\theta_j, \sigma_j), \quad j = 1, \dots, 8 \\
+\theta_j &= \mu + \xi \, \eta_j \\
+\eta_j &\sim \text{Normal}(0, \sigma_\eta) \\
+\sigma_\eta &\sim \text{InverseGamma}(1, 1) \\
+\mu &\sim \text{Normal}(0, 100) \\
+\xi &\sim \text{Normal}(0, 5)
+\end{aligned}
+$$
+
+```{r}
+#| label: code-eight-schools
+#| echo: true
+#| eval: false
+y <- c(28, 8, -3, 7, -1, 1, 18, 12)
+sigma_y <- c(15, 10, 16, 11, 9, 11, 10, 18)
+N <- length(y)
+sigma_eta <- inverse_gamma(1, 1)
+eta <- normal(0, sigma_eta, dim = N)
+mu_theta <- normal(0, 100)
+xi <- normal(0, 5)
+theta <- mu_theta + xi * eta
+distribution(y) <- normal(theta, sigma_y)
+m <- model(sigma_eta, eta, mu_theta, xi)
+```
+
+## cjs
+
+A Cormack-Jolly-Seber capture-recapture model: survival, $\phi_t$, and recapture, $p_t$, on each of 20 occasions, from the simulated capture histories $y_{it}$ of 100 animals. Animal $i$ is first caught on occasion $f_i$ and last on $l_i$, so it is known to be alive on every occasion between. $\chi_t$ is the probability that an animal alive on occasion $t$ is never seen again, built by a recursion over the 19 earlier occasions. `{r} parameter_text(fit_draws, "cjs", tier)`
+
+$$
+\begin{aligned}
+\phi_t, \, p_t &\sim \text{Beta}(1, 1), \quad t = 1, \dots, 20 \\
+\chi_{20} &= 1, \qquad \chi_t = (1 - \phi_t) + \phi_t \, (1 - p_{t + 1}) \, \chi_{t + 1} \\
+1 &\sim \text{Bernoulli}(\phi_{t - 1}), \quad f_i < t \le l_i \\
+y_{it} &\sim \text{Bernoulli}(p_t), \quad f_i < t \le l_i \\
+1 &\sim \text{Bernoulli}(\chi_{l_i}), \quad \text{if } l_i < 20
+\end{aligned}
+$$
+
+```{r}
+#| label: code-cjs
+#| echo: true
+#| eval: false
+set.seed(2026)
+n_obs <- 100
+n_time <- 20
+y <- matrix(
+  sample(c(0, 1), size = n_obs * n_time, replace = TRUE),
+  ncol = n_time
+)
+
+first_obs <- apply(y, 1, function(x) min(which(x > 0)))
+final_obs <- apply(y, 1, function(x) max(which(x > 0)))
+obs_id <- apply(
+  y,
+  1,
+  function(x) {
+    seq(min(which(x > 0)), max(which(x > 0)), by = 1)[-1]
+  }
+)
+obs_id <- unlist(obs_id)
+capture_vec <- apply(
+  y,
+  1,
+  function(x) x[min(which(x > 0)):max(which(x > 0))][-1]
+)
+capture_vec <- unlist(capture_vec)
+
+phi <- beta(1, 1, dim = n_time)
+p <- beta(1, 1, dim = n_time)
+
+chi <- ones(n_time)
+for (i in seq_len(n_time - 1)) {
+  tn <- n_time - i
+  chi[tn] <- (1 - phi[tn]) + phi[tn] * (1 - p[tn + 1]) * chi[tn + 1]
+}
+
+alive_data <- ones(length(obs_id))
+not_seen_last <- final_obs != n_time
+final_observation <- ones(sum(not_seen_last))
+
+distribution(alive_data) <- bernoulli(phi[obs_id - 1])
+distribution(capture_vec) <- bernoulli(p[obs_id])
+distribution(final_observation) <- bernoulli(
+  chi[final_obs[not_seen_last]]
+)
+
+m <- model(phi, p)
+```
+
+# 1. Speed
+
+Each version runs these calls on each model, where `k` is the version's iterations per draw. `model()` and `opt()` are repeated between `{r} bench_iterations` and `{r} 2 * bench_iterations` times, and `mcmc()` between `{r} mcmc_iterations` and `{r} 2 * mcmc_iterations` times, all in one process per version, after each model has been built and traced once.
+
+```{r}
+#| label: timed-code
+#| output: asis
+code_block(c(
+  "model()",
+  sprintf("opt(m, optimiser = adam(), max_iterations = %d)", opt_iterations),
+  sprintf(
+    "mcmc(m, warmup = %d / k, n_samples = %d / k, chains = %d, n_cores = %d)",
+    warmup_iterations,
+    sample_iterations,
+    mcmc_chains,
+    mcmc_cores
+  )
+))
+```
 
 ```{r}
 #| label: fig-speed
-#| fig-cap: "Every timed iteration, one row per method. The two rows in a panel do identical work, so the one further right is slower. Panels are different tasks and examples, which are not comparable with each other - only the two rows within a panel are."
-#| fig-height: 5
-autoplot(timings) +
-  aes(y = branch) +
+#| fig-cap: "Every timed repeat, one row per version: the small dots are single repeats and the large dot is their mean. The rows in a panel do the same calls, so a row further right took longer. Panels are different tasks and models, on their own scales."
+#| fig-height: 6
+every_repeat |>
+  ggplot(aes(x = seconds, y = branch, colour = branch)) +
+  geom_point(size = 1.5, alpha = 0.4) +
+  stat_summary(fun = mean, geom = "point", size = 4) +
   facet_grid(example ~ task, scales = "free_x") +
-  labs(y = NULL) +
+  labs(x = "seconds", y = NULL) +
+  theme(legend.position = "none")
+```
+
+<details>
+<summary>Table of the median, minimum and maximum, in milliseconds</summary>
+
+```{r}
+#| label: speed-range-table
+every_repeat |>
+  group_by(task, example, branch) |>
+  summarise(
+    ms = sprintf(
+      "%.1f (%.1f-%.1f)",
+      1000 * median(seconds),
+      1000 * min(seconds),
+      1000 * max(seconds)
+    ),
+    .groups = "drop"
+  ) |>
+  pivot_wider(names_from = branch, values_from = ms) |>
+  arrange(task, example) |>
+  kable()
+```
+
+</details>
+
+<details>
+<summary>Table of the ratio of medians for each pair of versions: the first version named over the second</summary>
+
+```{r}
+#| label: speed-ratio-table
+speed |>
+  select(example, task, all_of(comparisons$comparison)) |>
+  mutate(across(all_of(comparisons$comparison), \(ratio) round(ratio, 2))) |>
+  arrange(task, example) |>
+  kable()
+```
+
+</details>
+
+# 2. Efficiency
+
+Seconds of sampling per 1000 effective draws: `mcmc()` with `{r} warmup_iterations` warmup and `{r} sample_iterations` sampling iterations, then `extra_samples()` until the smallest bulk ESS over the model's variables reaches `{r} target_ess` and every R-hat is below 1.01, or until the tier's time limit. A run that reaches the time limit is marked `hit_cap` in the table of sampling runs under Details.
+
+```{r}
+#| label: fig-sampling
+#| fig-cap: "Seconds of sampling per 1000 effective draws. With one run per version and model, a bar is that run; with several, the small dots are runs and the large dot is their mean."
+#| fig-height: 3.5
+one_run_each <- all(count(sampling, example, branch)$n == 1)
+if (one_run_each) {
+  sampling_plot <- sampling |>
+    ggplot(aes(x = seconds_per_1000_ess, y = example, fill = branch)) +
+    geom_col(position = "dodge")
+} else {
+  sampling_plot <- sampling |>
+    ggplot(aes(x = seconds_per_1000_ess, y = example, colour = branch)) +
+    geom_point(size = 1.5, alpha = 0.4, position = position_dodge(width = 0.6)) +
+    stat_summary(
+      fun = mean,
+      geom = "point",
+      size = 4,
+      position = position_dodge(width = 0.6)
+    )
+}
+sampling_plot +
+  labs(
+    x = "seconds per 1000 effective draws",
+    y = NULL,
+    fill = NULL,
+    colour = NULL
+  ) +
   theme(legend.position = "bottom")
 ```
 
+<details>
+<summary>Table of the median for each version, the ratio of medians for each pair, and the number of runs</summary>
+
 ```{r}
-#| label: speed-ratio
-ratio |>
-  transmute(
-    example,
-    task,
-    reference = round(.data[[reference]], 1),
-    under_test = round(.data[[under_test]], 1),
-    ratio = round(ratio, 2),
-    direction = if_else(ratio > 1, "slower", "faster")
+#| label: sampling-table
+sampling_speed |>
+  mutate(
+    across(all_of(versions), \(seconds) round(seconds, 2)),
+    across(all_of(comparisons$comparison), \(ratio) round(ratio, 2))
   ) |>
+  select(example, all_of(versions), all_of(comparisons$comparison), runs) |>
   kable(
     col.names = c(
-      "example",
-      "task",
-      paste(reference, "(ms)"),
-      paste(under_test, "(ms)"),
-      "ratio",
-      ""
+      "model",
+      paste(versions, "(s)"),
+      comparisons$comparison,
+      "runs"
     )
   )
 ```
 
-## 2. Does it sample more efficiently?
+</details>
 
-Seconds to reach a minimum bulk-ESS of `{r} target_ess` - a different question
-from the fixed-length `mcmc` above, which measures per-iteration cost. Quality
-is held fixed and cost is measured, so there is no convergence gate discarding runs -
-a method that cannot reach the target appears as `hit_cap` rather than
-vanishing.
-
-```{r}
-#| label: fig-sampling
-#| fig-cap: "Seconds of sampling per 1000 effective draws, one bar per method. Lower is better. Each panel is one example; the comparison is between the two bars within a panel."
-#| fig-height: 3.5
-sampling |>
-  ggplot(aes(x = seconds_per_1000_ess, y = branch, fill = branch)) +
-  geom_point(aes(colour = branch)) +
-  facet_wrap(~example, ncol = 2, scales = "free_x") 
-  labs(x = "seconds per 1000 effective draws", y = NULL) +
-  theme_minimal(base_size = 10)
-```
-
-### Memory
-
-End-of-run resident set size - the physical RAM the measuring process held,
-not residual sum of squares. `bench`'s `mem_alloc` is deliberately not used:
-it comes from `Rprofmem` and sees the R heap only, while greta's memory lives
-in the TensorFlow graph on the Python side.
+## Memory
 
 ```{r}
 #| label: rss
 rss |>
   mutate(rss_mb = round(rss_mb)) |>
-  kable(col.names = c("method", "RSS (MB)"))
+  kable(col.names = c("version", "RSS (MB)"))
 ```
 
-## 3. Does it give the same answer?
+- RSS is resident set size: the physical memory the measuring process held, in MB.
+- It is read once, at the end of each version's run, so it covers every task together, and it is not a peak.
+- It is used rather than `bench`'s `mem_alloc`, which sees only R's memory. Most of greta's memory is held by TensorFlow, on the Python side.
 
-The question a timing cannot answer: two methods can both converge, both be
-fast, and disagree about the estimate. Posterior means always differ a little
-between runs, so the comparison is in **Monte Carlo standard error units**
-rather than raw differences [@vehtari2021; @magnusson2025]:
+# 3. Agreement
+
+For each variable, the difference between two versions' posterior means, divided by the Monte Carlo standard error of that difference [@vehtari2021; @magnusson2025], from the runs in section 2:
 
 $$z = \frac{\bar\theta_{\text{test}} - \bar\theta_{\text{ref}}}{\sqrt{\text{mcse}^2_{\text{test}} + \text{mcse}^2_{\text{ref}}}}$$
 
+The tables label a variable as disagreeing when $|z| > 4$.
+
 ```{r}
 #| label: fig-agreement
-#| fig-cap: "Every variable's difference in means, in MCSE units. Inside the shaded band the two methods agree to within the precision either of them has."
-#| fig-height: 3
+#| fig-cap: "Every variable's difference in means, in MCSE units, for each pair of versions. The shaded band is |z| up to 4."
+#| fig-height: 6
 ggplot(posterior_comparison, aes(x = z_mean, y = example)) +
   annotate(
     "rect",
@@ -163,9 +438,13 @@ ggplot(posterior_comparison, aes(x = z_mean, y = example)) +
   ) +
   geom_vline(xintercept = 0, colour = "grey40") +
   stat_dots(side = "both", scale = 0.6) +
-  labs(x = "difference in means (MCSE units)", y = NULL) +
-  theme_minimal(base_size = 10)
+  facet_wrap(~comparison, ncol = 1) +
+  expand_limits(x = c(-6, 6)) +
+  labs(x = "difference in means (MCSE units)", y = NULL)
 ```
+
+<details>
+<summary>Table of the largest |z| for each model and pair of versions</summary>
 
 ```{r}
 #| label: agreement-table
@@ -173,59 +452,164 @@ agreement |>
   mutate(max_abs_z = round(max_abs_z, 2)) |>
   kable(
     col.names = c(
-      "example",
+      "comparison",
+      "model",
       "variables",
       "largest |z|",
-      "disagreeing",
-      "worst variable",
-      "verdict"
+      "variables with |z| > 4",
+      "variable with the largest |z|",
+      "label"
     )
   )
 ```
 
-## 4. What do the fits look like?
+</details>
 
-One seeded run of each example on each branch: 4 chains of 1000 warmup and
-1000 samples. The plots put the branches side by side, so a difference in how
-a model samples or what it estimates shows as a difference between panels.
+# 4. Convergence
 
-### Fitted values against the data
-
-The fitted values are each model's expected value for the data, such as the
-regression line, not new data simulated from the model. The ribbons are 50%,
-80% and 95% intervals; the points and crosses are the data.
+R-hat and effective sample size over each model's variables, for one seeded fit of each model on each version: `{r} mcmc_chains` chains of `{r} warmup_iterations` warmup and `{r} sample_iterations` sampling iterations. Versions whose `mcmc()` follows `set.seed()` start from the same random numbers; greta 0.6.0's does not.
 
 ```{r}
-#| label: fig-fits
+#| label: fig-diagnostics
+#| fig-cap: "Bulk ESS of each fit over the model's variables: the line runs from the smallest to the largest, the point is the median. The dashed line is 400. Log scale."
+#| fig-height: 5
+fit_diagnostics |>
+  ggplot(aes(y = branch, colour = branch)) +
+  geom_vline(xintercept = 400, linetype = "dashed", colour = "grey50") +
+  geom_pointrange(
+    aes(x = ess_bulk_median, xmin = ess_bulk_min, xmax = ess_bulk_max)
+  ) +
+  scale_x_log10() +
+  facet_wrap(~example, ncol = 1) +
+  labs(x = "bulk ESS", y = NULL) +
+  theme(legend.position = "none")
+```
+
+<details>
+<summary>Table of R-hat and ESS for each fit</summary>
+
+```{r}
+#| label: diagnostics-table
+fit_diagnostics |>
+  mutate(
+    rhat_max = round(rhat_max, 3),
+    across(starts_with("ess"), round)
+  ) |>
+  arrange(example, branch) |>
+  kable(
+    col.names = c(
+      "model",
+      "version",
+      "largest R-hat",
+      "bulk ESS, min",
+      "bulk ESS, median",
+      "bulk ESS, max",
+      "tail ESS, min"
+    )
+  )
+```
+
+</details>
+
+# 5. Fits
+
+The fits from section 4. Each version is a colour. The fitted values are each model's expected value for the data, such as its regression line, not new data simulated from the model. The data are the black points.
+
+## linear
+
+```{r}
+#| label: fig-fit-linear
+#| fig-cap: "The fitted line's median and 95% interval."
 #| fig-height: 4
-for (example_name in example_names) {
-  print(gg_fit(fitted_values, example_name))
-}
+gg_fit(fitted_values, "linear")
 ```
 
-### Posterior densities
+```{r}
+#| label: fig-densities-linear
+#| fig-cap: "Posterior densities."
+#| fig-height: 3
+gg_densities(fit_draws, "linear")
+```
 
-The first eight variables of each example, as densities with their median and
-66% and 95% intervals, one row per branch.
+## multiple_linear
 
 ```{r}
-#| label: fig-densities
+#| label: fig-fit-multiple-linear
+#| fig-cap: "Each fitted value's median, 50% and 95% intervals, against the value it fits. The dashed line is where the two are equal."
+#| fig-height: 4
+gg_fit(fitted_values, "multiple_linear")
+```
+
+```{r}
+#| label: fig-densities-multiple-linear
+#| fig-cap: "Posterior densities."
 #| fig-height: 4.5
-for (example_name in example_names) {
-  print(gg_densities(fit_draws, example_name))
+gg_densities(fit_draws, "multiple_linear")
+```
+
+## hierarchical_linear
+
+```{r}
+#| label: fig-fit-hierarchical-linear
+#| fig-cap: "The fitted line's median and 95% interval, by species."
+#| fig-height: 4
+gg_fit(fitted_values, "hierarchical_linear")
+```
+
+```{r}
+#| label: fig-densities-hierarchical-linear
+#| fig-cap: "Posterior densities."
+#| fig-height: 4.5
+gg_densities(fit_draws, "hierarchical_linear")
+```
+
+## eight_schools
+
+```{r}
+#| label: fig-fit-eight-schools
+#| fig-cap: "Each school's estimated effect: median, 50% and 95% intervals. The black points are the observed effects."
+#| fig-height: 4
+gg_fit(fitted_values, "eight_schools")
+```
+
+```{r}
+#| label: fig-densities-eight-schools
+#| fig-cap: "Posterior densities of the first eight variables."
+#| fig-height: 4.5
+gg_densities(fit_draws, "eight_schools")
+```
+
+## cjs
+
+`{r} if ("cjs" %in% example_names) "" else paste0("Not measured at the ", tier, " tier.")`
+
+```{r}
+#| label: fig-fit-cjs
+#| fig-cap: "Survival on each occasion: median, 50% and 95% intervals. There is no data to compare it with."
+#| fig-height: 4
+if ("cjs" %in% example_names) {
+  gg_fit(fitted_values, "cjs")
 }
 ```
 
-### Trace plots
+```{r}
+#| label: fig-densities-cjs
+#| fig-cap: "Posterior densities of the first eight variables."
+#| fig-height: 4.5
+if ("cjs" %in% example_names) {
+  gg_densities(fit_draws, "cjs")
+}
+```
 
-The first six variables of each example, each chain in its own colour. Chains
-that overlap and wander around a common level are what mixing looks like.
+# 6. Further measurements
 
 ```{r}
-#| label: fig-traces
-#| fig-height: 6
-for (example_name in example_names) {
-  print(gg_traces(fit_draws, example_name))
+#| label: further
+#| output: asis
+if (nzchar(params$further)) {
+  cat(knitr::knit_child(params$further, quiet = TRUE, envir = environment()))
+} else {
+  cat("None for this run.\n")
 }
 ```
 
@@ -233,18 +617,7 @@ for (example_name in example_names) {
 
 ::: panel-tabset
 
-## Timings
-
-```{r}
-#| label: timings-detail
-timings_relative |>
-  mutate(ms = round(ms, 1), relative = round(relative, 3)) |>
-  pivot_wider(names_from = branch, values_from = c(ms, relative)) |>
-  rename_with(\(nm) sub("^ms_", "ms: ", sub("^relative_", "relative: ", nm))) |>
-  kable()
-```
-
-## Sampling
+## Sampling runs
 
 ```{r}
 #| label: sampling-detail
@@ -254,7 +627,7 @@ sampling |>
     example,
     rep,
     elapsed,
-    mcmc_samples,
+    mcmc_iterations,
     ess_bulk_min,
     ess_bulk_median,
     rhat_max,
@@ -262,63 +635,32 @@ sampling |>
     hit_cap
   ) |>
   mutate(across(where(is.numeric), \(x) round(x, 2))) |>
-  rename(method = branch) |>
-  kable()
-```
-
-A single run gives a zero-width interval, which cannot overlap anything, so
-the replicate count decides the verdict before the intervals get a say. `quick`
-and `standard` run one replicate and will always say so; only `thorough` can
-resolve a sampling speed difference.
-
-```{r}
-#| label: sampling-resolution
-sampling |>
-  filter(!hit_cap) |>
-  group_by(example, branch) |>
-  summarise(
-    mid = median(seconds_per_1000_ess),
-    lo = min(seconds_per_1000_ess),
-    hi = max(seconds_per_1000_ess),
-    n = n(),
-    .groups = "drop"
-  ) |>
-  pivot_wider(names_from = branch, values_from = c(mid, lo, hi, n)) |>
-  rename_with(\(nm) sub(paste0("_", under_test, "$"), "_test", nm)) |>
-  rename_with(\(nm) sub(paste0("_", reference, "$"), "_ref", nm)) |>
-  mutate(
-    ratio = round(mid_test / mid_ref, 2),
-    runs = pmin(n_test, n_ref),
-    verdict = case_when(
-      runs < 2 ~ "too few runs to say",
-      lo_test > hi_ref | hi_test < lo_ref ~ "resolved",
-      .default = "unresolved"
-    )
-  ) |>
-  select(example, ratio, runs, verdict) |>
+  rename(version = branch) |>
   kable()
 ```
 
 ## Posteriors
 
-The marginal for every variable, both methods overlaid. Intervals sitting on
-top of each other are the expected result.
+The mean and 90% interval, the 5% to 95% quantiles, of each model's six widest variables, from the runs in section 2.
+
+```{r}
+#| label: widest-variables
+widest_variables <- pooled_posterior |>
+  group_by(example) |>
+  slice_max(q95 - q5, n = 6) |>
+  ungroup()
+```
 
 ```{r}
 #| label: fig-intervals
 #| fig-height: 7
-pooled_posterior |>
-  group_by(example) |>
-  slice_max(q95 - q5, n = 6) |>
-  ungroup() |>
-  ggplot(aes(y = variable, colour = branch)) +
+ggplot(widest_variables, aes(y = variable, colour = branch)) +
   geom_pointinterval(
     aes(x = mean, xmin = q5, xmax = q95),
     position = position_dodge(width = 0.5)
   ) +
   facet_wrap(~example, scales = "free", ncol = 2) +
   labs(x = NULL, y = NULL, colour = NULL) +
-  theme_minimal(base_size = 10) +
   theme(legend.position = "bottom")
 ```
 
@@ -326,38 +668,20 @@ pooled_posterior |>
 
 ```{r}
 #| label: provenance
-str(tar_read(provenance))
+str(provenance)
 ```
 
 :::
 
 # Methods
 
-**Diagnostics.** Rank-normalised split-R̂ and bulk/tail effective sample size,
-with R̂ < 1.01 and ESS > 400 as reference thresholds [@vehtari2021]. ESS > 400
-is where the diagnostics become trustworthy, not where accuracy becomes
-sufficient. `coda::effectiveSize()` is deliberately not used: it fits an AR
-model per chain with no between-chain information, so it reports a large ESS
-for chains stuck in different modes.
+**Diagnostics.** Rank-normalised split-R̂ and bulk and tail effective sample size [@vehtari2021]. ESS above 400 is where the diagnostics become reliable, not where accuracy becomes sufficient. `coda::effectiveSize()` is not used: it fits an AR model per chain with no between-chain information, so it reports a large ESS for chains stuck in different modes.
 
-**Comparing posteriors.** Differences in posterior means are divided by the
-combined Monte Carlo standard error, so bias is separable from Monte Carlo
-noise [@magnusson2025]. A two-sample Kolmogorov-Smirnov test on the draws
-would be wrong here: it assumes both samples are iid, and MCMC draws are
-autocorrelated, so a correct sampler is rejected too often [@talts2018].
+**Comparing posteriors.** Differences in posterior means are divided by the combined Monte Carlo standard error, so bias is separable from Monte Carlo noise [@magnusson2025]. A two-sample Kolmogorov-Smirnov test on the draws is not used: it assumes both samples are independent draws, and MCMC draws are autocorrelated, so a correct sampler is rejected too often [@talts2018]. With one $z$ per variable, the largest of many exceeds 2 routinely, so the label threshold is 4.
 
-**Timing.** Timing noise is one-sided, so the minimum is the robust estimator
-[@chen2016]. Effect-size intervals are reported rather than significance tests
-[@kalibera2013]; a ratio whose spread is wider than the effect is labelled
-unresolved rather than quoted.
+**Timing.** Timing noise is one-sided [@chen2016]: a run can be slowed by something else on the machine, never sped up. The speed plot shows every repeat so the spread can be read beside the mean. A single sampling run per version cannot separate a difference from run-to-run variation; the thorough tier runs three. Effect sizes are reported rather than significance tests [@kalibera2013].
 
-**What is not measured.** Gradient evaluations are not counted, so a change can
-be attributed to wall time but not to "needs fewer gradients" versus "each
-gradient got cheaper" [@hoffman2021]. There is no external reference posterior,
-so a bug present in both methods would pass unnoticed; posteriordb
-[@magnusson2025] and Inference Gym are the obvious sources if that becomes
-worth closing. `rhat_nested()` [@margossian2025] would be the right diagnostic
-if greta's chains were ever run many-and-short.
+**What is not measured.** Gradient evaluations are not counted, so a difference in wall time cannot be split into fewer gradients and cheaper gradients [@hoffman2021]. There is no external reference posterior, so a bug present in every version would not show; posteriordb [@magnusson2025] and Inference Gym hold reference posteriors.
 
 # References
 
