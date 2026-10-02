@@ -66,12 +66,12 @@ target_progress <- function(summ, target_ess) {
   )
 }
 
-# Efficiency is ESS per iteration so far, extrapolated linearly with 20%
-# headroom - efficiency is estimated from a short chain and is optimistic early.
-next_chunk <- function(progress, n_iterations, target_ess, max_chunk) {
-  efficiency <- progress$ess_bulk_min / n_iterations
+# Efficiency is ESS per draw so far, extrapolated linearly with 20% headroom -
+# efficiency is estimated from a short chain and is optimistic early.
+next_chunk <- function(progress, n_draws, target_ess, max_chunk) {
+  efficiency <- progress$ess_bulk_min / n_draws
   # a chain producing almost no effective samples gives an efficiency near zero
-  # and would ask for an absurd number of iterations
+  # and would ask for an absurd number of draws
   wanted <- 1.2 * (target_ess - progress$ess_bulk_min) / max(efficiency, 1e-6)
   as.integer(max(min(wanted, max_chunk), 100))
 }
@@ -107,19 +107,19 @@ sample_to_target <- function(
     verbose = FALSE
   )
 
-  n_iterations <- initial_samples
+  n_draws <- initial_samples
   summ <- posterior_summary(draws)
   progress <- target_progress(summ, target_ess)
 
   while (!progress$reached && bench::hires_time() - start < time_limit) {
-    chunk <- next_chunk(progress, n_iterations, target_ess, max_chunk)
+    chunk <- next_chunk(progress, n_draws, target_ess, max_chunk)
     draws <- greta::extra_samples(
       draws,
       n_samples = chunk,
       n_cores = n_cores,
       verbose = FALSE
     )
-    n_iterations <- n_iterations + chunk
+    n_draws <- n_draws + chunk
     summ <- posterior_summary(draws)
     progress <- target_progress(summ, target_ess)
   }
@@ -128,7 +128,7 @@ sample_to_target <- function(
 
   out <- data.frame(
     elapsed = total,
-    mcmc_samples = n_iterations,
+    mcmc_samples = n_draws,
     seconds_per_1000_ess = 1000 * total / progress$ess_bulk_min,
     ess_bulk_min = progress$ess_bulk_min,
     ess_bulk_median = progress$ess_bulk_median,

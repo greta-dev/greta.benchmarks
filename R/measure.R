@@ -15,27 +15,49 @@
 
 #' Measure both tiers on every branch, in one pass per branch.
 #'
+#' `shas` is branch_shas()'s table of branches and their commits, so the
+#' measurement depends on the commits, not only the names: a branch that moves
+#' is measured again. A branch that moves while it is being measured would be
+#' measured at a commit the results do not record, so that is an error.
+#'
 #' `current = FALSE` matters: cross defaults to TRUE, which silently prepends
 #' whatever branch is checked out and mislabels it.
 measure_branches <- function(
-  branches,
+  shas,
   examples_file,
   target_file,
+  iterations_file,
   greta_repo,
   bench_iterations,
   mcmc_iterations,
+  warmup_iterations,
+  sample_iterations,
+  mcmc_chains,
+  mcmc_cores,
+  opt_iterations,
   target_ess,
   reps,
   time_limit,
   example_names
 ) {
+  branches <- shas$branch
+  stop_if_moved(shas, greta_repo)
+
   body <- bquote({
     library(greta)
     library(bench)
     source(.(examples_file))
     source(.(target_file))
+    source(.(iterations_file))
 
     examples <- bench_examples()[.(example_names)]
+
+    # mcmc() takes draws, not iterations, and versions differ in how many
+    # iterations a draw costs, so every call below asks for the draws that
+    # make the same number of iterations on every version
+    iterations_per_kept_draw <- iterations_per_draw()
+    warmup_draws <- as.integer(.(warmup_iterations) / iterations_per_kept_draw)
+    sample_draws <- as.integer(.(sample_iterations) / iterations_per_kept_draw)
 
     # construct and trace once outside the timing: model() is itself a task
     # below, and first-use tracing is a different question from steady state.
@@ -48,8 +70,8 @@ measure_branches <- function(
         m,
         n_samples = 10,
         warmup = 10,
-        chains = 4,
-        n_cores = 4L,
+        chains = .(mcmc_chains),
+        n_cores = .(as.integer(mcmc_cores)),
         verbose = FALSE
       ))
     }
@@ -64,7 +86,7 @@ measure_branches <- function(
         m <- built[[example]]
         bench::mark(
           model = examples[[example]](),
-          opt = opt(m, optimiser = adam(), max_iterations = 100),
+          opt = opt(m, optimiser = adam(), max_iterations = .(opt_iterations)),
           check = FALSE,
           filter_gc = FALSE,
           # mem_alloc comes from Rprofmem, which sees the R heap only - greta's
@@ -77,8 +99,8 @@ measure_branches <- function(
       }
     )
 
-    # a FIXED number of iterations at greta's default shape, which is
-    # deterministic work and so measures what one run costs. The sampling tier
+    # the same iterations on every branch, which is deterministic work and so
+    # measures what one run costs. The sampling tier
     # below answers the different question of what reaching a quality target
     # costs, and cannot separate per-iteration cost from how well the chain
     # happened to mix.
@@ -89,10 +111,10 @@ measure_branches <- function(
         bench::mark(
           mcmc = mcmc(
             m,
-            n_samples = 1000,
-            warmup = 1000,
-            chains = 4,
-            n_cores = 4L,
+            n_samples = sample_draws,
+            warmup = warmup_draws,
+            chains = .(mcmc_chains),
+            n_cores = .(as.integer(mcmc_cores)),
             verbose = FALSE
           ),
           check = FALSE,
@@ -119,8 +141,11 @@ measure_branches <- function(
           row <- sample_to_target(
             examples[[example]](),
             target_ess = .(target_ess),
+            warmup = warmup_draws,
+            initial_samples = sample_draws,
             time_limit = .(time_limit)
           )
+          row$mcmc_iterations <- row$mcmc_samples * iterations_per_kept_draw
           cbind(example = example, rep = rep, row)
         },
         grid$example,
@@ -136,9 +161,10 @@ measure_branches <- function(
       set.seed(2026 - 09 - 30)
       draws <- mcmc(
         m,
-        n_samples = 1000,
-        warmup = 1000,
-        chains = 4,
+        n_samples = sample_draws,
+        warmup = warmup_draws,
+        chains = .(mcmc_chains),
+        n_cores = .(as.integer(mcmc_cores)),
         verbose = FALSE
       )
       fitted_draws <- as.matrix(calculate(fit$fitted, values = draws))
@@ -163,7 +189,8 @@ measure_branches <- function(
       timings = timings,
       sampling = sampling,
       rss_mb = rss_mb(),
-      fits = fits
+      fits = fits,
+      iterations_per_draw = iterations_per_kept_draw
     )
   })
 
@@ -176,7 +203,24 @@ measure_branches <- function(
     )
   )
 
-  with_dir(greta_repo, eval(call))
+  measured <- with_dir(greta_repo, eval(call))
+  stop_if_moved(shas, greta_repo)
+  measured$branch <- shas$label[match(measured$branch, shas$branch)]
+  measured
+}
+
+# checked before and after measuring, so the commits recorded in `shas` are
+# the ones that were installed
+stop_if_moved <- function(shas, greta_repo) {
+  now <- branch_shas(shas$branch, greta_repo)
+  moved <- now$sha != shas$sha
+  if (any(moved)) {
+    stop(
+      paste(shas$branch[moved], collapse = ", "),
+      " moved to a new commit while being measured; run tar_make() again",
+      call. = FALSE
+    )
+  }
 }
 
 #' The deterministic tier, recombined across branches.
@@ -187,6 +231,7 @@ measure_branches <- function(
 branch_timings <- function(measured) {
   parts <- lapply(measured$result, function(x) x$timings)
   out <- bind_rows(setNames(parts, measured$branch), .id = "branch")
+  out$branch <- factor(out$branch, levels = measured$branch)
   out <- bench::as_bench_mark(out)
   out$task <- as.character(out$expression)
   out$engine <- c(model = NA_character_, opt = "adam", mcmc = "hmc")[out$task]
@@ -197,6 +242,7 @@ branch_timings <- function(measured) {
 branch_sampling <- function(measured) {
   parts <- lapply(measured$result, function(x) x$sampling)
   out <- bind_rows(setNames(parts, measured$branch), .id = "branch")
+  out$branch <- factor(out$branch, levels = measured$branch)
   out$task <- "mcmc_to_target"
   out$engine <- "hmc"
   out
@@ -210,16 +256,32 @@ branch_fits <- function(measured) {
 #' End-of-run resident set size per branch, in MB. See rss_mb().
 branch_rss <- function(measured) {
   data.frame(
-    branch = measured$branch,
+    branch = factor(measured$branch, levels = measured$branch),
     rss_mb = vapply(measured$result, function(x) x$rss_mb, numeric(1))
+  )
+}
+
+#' How many iterations each branch ran per kept draw. See iterations_per_draw().
+branch_iterations <- function(measured) {
+  data.frame(
+    branch = factor(measured$branch, levels = measured$branch),
+    iterations_per_draw = vapply(
+      measured$result,
+      function(x) x$iterations_per_draw,
+      numeric(1)
+    )
   )
 }
 
 #' The SHAs actually measured. Captured here rather than at render time because
 #' branches move, and a moved branch would record a commit never measured.
+#'
+#' `label` is the name the report uses for each git ref, such as "CRAN" for
+#' v0.6.0; unnamed refs are their own label.
 branch_shas <- function(branches, greta_repo) {
   data.frame(
-    branch = branches,
+    label = names(branches) %||% branches,
+    branch = unname(branches),
     sha = vapply(branches, function(b) git_sha(greta_repo, b), character(1)),
     row.names = NULL
   )

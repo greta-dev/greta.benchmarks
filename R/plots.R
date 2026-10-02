@@ -1,7 +1,7 @@
-# The report's plots of each example's fit: trace plots, posterior densities,
-# and fitted values against the data, each with the two branches side by side.
-# tidy_*() reshape branch_fits() into long data frames, which are targets;
-# gg_*() build a ggplot from them and write nothing.
+# The report's plots of each example's fit: posterior densities, and fitted
+# values against the data, with every branch drawn on the same axes so they
+# can be compared directly. tidy_*() reshape branch_fits() into long data
+# frames, which are targets; gg_*() build a ggplot from them and write nothing.
 
 #' Every draw of every variable, one row per draw.
 tidy_fit_draws <- function(fits) {
@@ -57,6 +57,34 @@ tidy_fitted <- function(fits) {
   out
 }
 
+#' Each seeded fit's worst R-hat, the minimum, median and maximum bulk ESS over
+#' its variables, and its smallest tail ESS.
+tidy_fit_diagnostics <- function(fits) {
+  parts <- list()
+  for (branch in names(fits)) {
+    for (example in names(fits[[branch]])) {
+      summ <- posterior::summarise_draws(
+        fits[[branch]][[example]]$draws,
+        "rhat",
+        "ess_bulk",
+        "ess_tail"
+      )
+      parts[[length(parts) + 1]] <- data.frame(
+        example = example,
+        branch = branch,
+        rhat_max = max(summ$rhat),
+        ess_bulk_min = min(summ$ess_bulk),
+        ess_bulk_median = median(summ$ess_bulk),
+        ess_bulk_max = max(summ$ess_bulk),
+        ess_tail_min = min(summ$ess_tail)
+      )
+    }
+  }
+  out <- bind_rows(parts)
+  out$branch <- factor(out$branch, levels = names(fits))
+  out
+}
+
 # the first few of an example's variables, since cjs has forty
 first_variables <- function(fit_draws, example_name, max_variables) {
   one <- fit_draws[fit_draws$example == example_name, ]
@@ -64,84 +92,72 @@ first_variables <- function(fit_draws, example_name, max_variables) {
   one[one$variable %in% shown, ]
 }
 
-#' Each chain's draws in order: a stuck or wandering chain shows here first.
-gg_traces <- function(fit_draws, example_name, max_variables = 6) {
-  first_variables(fit_draws, example_name, max_variables) |>
-    ggplot(aes(x = .iteration, y = value, colour = factor(.chain))) +
-    geom_line(linewidth = 0.2, alpha = 0.8) +
-    facet_grid(variable ~ branch, scales = "free_y") +
-    labs(x = "iteration", y = NULL, colour = "chain", title = example_name)
-}
-
-#' Each variable's posterior as a density with its median and 66% and 95%
-#' intervals, one row per branch so the two can be read against each other.
+#' Each variable's posterior density, one line per branch.
 gg_densities <- function(fit_draws, example_name, max_variables = 8) {
   first_variables(fit_draws, example_name, max_variables) |>
-    ggplot(aes(x = value, y = branch, fill = branch)) +
-    # each panel's densities scaled on their own, or one narrow variable
-    # flattens every other panel to a line
-    stat_slabinterval(alpha = 0.7, normalize = "panels") +
-    facet_wrap(~variable, scales = "free_x") +
-    labs(x = NULL, y = NULL, title = example_name) +
-    theme(legend.position = "none")
+    ggplot(aes(x = value, colour = branch)) +
+    geom_density(linewidth = 0.5) +
+    facet_wrap(~variable, scales = "free") +
+    labs(x = NULL, y = NULL, colour = NULL) +
+    theme(axis.text.y = element_blank(), legend.position = "bottom")
 }
 
-#' Fitted values against the data they model: a ribbon over a continuous
-#' predictor, one interval per unit for a discrete one, or fitted against
-#' observed when there is no predictor.
+#' Fitted values against the data they model, one colour per branch: a median
+#' line and 95% band over a continuous predictor, a median and 50% and 95%
+#' intervals per unit for a discrete one, or fitted against observed when there
+#' is no predictor. The data are the black points.
 gg_fit <- function(fitted_values, example_name) {
   one <- fitted_values[fitted_values$example == example_name, ]
   observed <- unique(
-    one[!is.na(one$observed), c("branch", ".row", "x", "group", "observed")]
+    one[!is.na(one$observed), c(".row", "x", "group", "observed")]
   )
   x_label <- one$x_label[[1]]
+  has_predictor <- !all(is.na(one$x))
+  one_value_per_unit <- one$style[[1]] == "interval"
+  dodge <- position_dodge(width = 0.6)
 
-  if (all(is.na(one$x))) {
+  if (!has_predictor) {
     return(
-      ggplot(one, aes(x = observed, y = value, group = .row)) +
-        stat_pointinterval(.width = c(0.5, 0.95), point_size = 0.8) +
+      ggplot(one, aes(x = observed, y = value, colour = branch)) +
+        stat_pointinterval(
+          aes(group = interaction(.row, branch)),
+          .width = c(0.5, 0.95),
+          point_size = 0.8,
+          position = dodge
+        ) +
         geom_abline(linetype = "dashed") +
-        facet_wrap(~branch) +
-        labs(x = "observed", y = "fitted", title = example_name)
+        labs(x = "observed", y = "fitted", colour = NULL) +
+        theme(legend.position = "bottom")
     )
   }
 
-  if (one$style[[1]] == "interval") {
-    plot <- ggplot(one, aes(x = factor(x), y = value)) +
-      stat_pointinterval(.width = c(0.5, 0.95))
-    if (nrow(observed) > 0) {
-      plot <- plot +
+  if (one_value_per_unit) {
+    return(
+      ggplot(one, aes(x = factor(x), y = value, colour = branch)) +
+        stat_pointinterval(.width = c(0.5, 0.95), position = dodge) +
         geom_point(
           data = observed,
           aes(x = factor(x), y = observed),
-          colour = "firebrick",
-          shape = 4,
-          size = 2.5
-        )
-    }
-    return(
-      plot +
-        facet_wrap(~branch) +
-        labs(x = x_label, y = "fitted", title = example_name)
+          inherit.aes = FALSE,
+          size = 2
+        ) +
+        labs(x = x_label, y = "fitted", colour = NULL) +
+        theme(legend.position = "bottom")
     )
   }
 
-  facets <- if (all(is.na(one$group))) {
-    facet_wrap(~branch)
-  } else {
-    facet_grid(group ~ branch)
-  }
-  ggplot(one, aes(x = x, y = value)) +
-    # a thin median line, so a narrow ribbon is not hidden underneath it
-    stat_lineribbon(.width = c(0.5, 0.8, 0.95), linewidth = 0.5) +
-    scale_fill_brewer() +
+  by_group <- if (all(is.na(one$group))) NULL else facet_wrap(~group)
+  ggplot(one, aes(x = x, y = value, colour = branch, fill = branch)) +
+    stat_ribbon(.width = 0.95, alpha = 0.15, colour = NA) +
+    # drawn on its own, so the ribbon's transparency does not fade the line
+    stat_summary(fun = median, geom = "line", linewidth = 0.6) +
     geom_point(
       data = observed,
       aes(x = x, y = observed),
       inherit.aes = FALSE,
-      size = 0.8,
-      alpha = 0.6
+      size = 0.8
     ) +
-    facets +
-    labs(x = x_label, y = "fitted", fill = "interval", title = example_name)
+    by_group +
+    labs(x = x_label, y = "fitted", colour = NULL, fill = NULL) +
+    theme(legend.position = "bottom")
 }

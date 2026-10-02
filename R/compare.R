@@ -57,13 +57,76 @@ compare_posteriors <- function(pooled, reference, under_test) {
     )
 }
 
-#' One row per example: does anything disagree?
+#' Every pair of branches, in the order given, the earlier one as the reference.
+branch_pairs <- function(labels) {
+  pairs <- utils::combn(labels, 2)
+  data.frame(
+    reference = pairs[1, ],
+    test = pairs[2, ],
+    comparison = paste(pairs[2, ], "vs", pairs[1, ])
+  )
+}
+
+#' compare_posteriors() for every pair in `comparisons`.
+compare_all_posteriors <- function(pooled, comparisons) {
+  Map(
+    function(reference, test, comparison) {
+      compare_posteriors(pooled, reference, test) |>
+        mutate(comparison = comparison, .before = 1)
+    },
+    comparisons$reference,
+    comparisons$test,
+    comparisons$comparison
+  ) |>
+    bind_rows() |>
+    mutate(comparison = factor(comparison, levels = comparisons$comparison))
+}
+
+#' Add the ratio of the two branches in each comparison, as a column named for
+#' it. A ratio above 1 means the test branch took longer than its reference.
+add_ratios <- function(wide, comparisons) {
+  ratios <- Map(
+    function(reference, test) wide[[test]] / wide[[reference]],
+    comparisons$reference,
+    comparisons$test
+  )
+  bind_cols(wide, setNames(ratios, comparisons$comparison))
+}
+
+#' Median milliseconds per example x task, one column per branch, and the
+#' ratios.
+speed_table <- function(timings_relative, comparisons) {
+  timings_relative |>
+    select(example, task, branch, ms) |>
+    pivot_wider(names_from = branch, values_from = ms) |>
+    add_ratios(comparisons)
+}
+
+#' Median seconds per 1000 effective draws per example, one column per branch,
+#' the ratios, and the fewest runs any branch's median is over.
+sampling_table <- function(sampling, comparisons) {
+  sampling |>
+    filter(!hit_cap) |>
+    group_by(example, branch) |>
+    summarise(
+      seconds = median(seconds_per_1000_ess),
+      runs = n(),
+      .groups = "drop"
+    ) |>
+    group_by(example) |>
+    mutate(runs = min(runs)) |>
+    ungroup() |>
+    pivot_wider(names_from = branch, values_from = seconds) |>
+    add_ratios(comparisons)
+}
+
+#' One row per comparison and example: does anything disagree?
 #'
 #' `threshold` is not 2. There is one z per variable and the largest of many
 #' standard normals exceeds 2 routinely - `cjs` alone has 40 of them.
 posterior_agreement <- function(comparison, threshold = 4) {
   comparison |>
-    group_by(example) |>
+    group_by(comparison, example) |>
     summarise(
       variables = n(),
       max_abs_z = max(abs(z_mean)),

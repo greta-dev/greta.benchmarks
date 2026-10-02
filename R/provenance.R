@@ -50,7 +50,8 @@ git_sha <- function(repo, rev) {
   sha <- try(
     system2(
       "git",
-      c("-C", shQuote(repo), "rev-parse", rev),
+      # ^{commit}, so an annotated tag gives its commit rather than the tag
+      c("-C", shQuote(repo), "rev-parse", shQuote(paste0(rev, "^{commit}"))),
       stdout = TRUE,
       stderr = FALSE
     ),
