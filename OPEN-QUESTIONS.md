@@ -175,3 +175,38 @@ need one process per measurement, which is the option below.
 
 Whichever is chosen, `mem_alloc` stays off: a number that ranks models
 backwards is worse than no number.
+
+End-of-run RSS is also unstable between runs of the same version: CRAN
+measured 743, 685 and 1026 MB in three runs on 2026-10-01, a 1.5x spread, so
+one run cannot rank versions.
+
+## 4. A targets pipeline per run directory
+
+Raised by Nick, 2026-10-01, for later.
+
+**What happens.** The pipeline in `_targets.R` is the standing comparison: one
+store, one `report.html`, overwritten by every run. A dated run directory that
+wants the report has to copy `report.html` out by hand before the next run
+replaces it (`2026-10-01-thinning-i318/`, `2026-10-01-retracing-i546/`), and
+its `_targets` store is not kept. Dated directories that are not the pipeline,
+such as `2026-10-01-iterations-and-efficiency-i318/`, are numbered scripts
+with their own conventions.
+
+**The idea.** Each run directory is its own targets project, with its own
+`_targets.R` and store, so a run is self-contained: its results, the code that
+produced them, and a report that can be re-rendered without re-measuring.
+targets supports this through `_targets.yaml`, one project per directory, run
+with `tar_make(project = )`. A template generator, a function here at first,
+perhaps a package later, would create the directory from a template:
+`new_run("retracing-i546", branches = c(...), tier = "quick")`.
+
+**To decide.**
+
+- Whether a run directory snapshots the shared functions in `R/` or sources
+  them. A snapshot keeps an old run reproducible as it was, but a fix to
+  `R/` does not reach it; sourcing keeps one copy, but editing `R/` marks every
+  old run outdated.
+- Whether the standing pipeline stays, with a `freeze_run()` that copies its
+  report and store into a dated directory, which is the smaller step.
+- Whether this is a function in greta.benchmarks or a package. `usethis`'s
+  `use_template()` and tflow already cover generating files from templates.
