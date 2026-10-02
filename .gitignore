@@ -6,6 +6,5 @@
 .quarto
 _targets/
 report.html
-report_files/
 */results_files/*
 *.html
