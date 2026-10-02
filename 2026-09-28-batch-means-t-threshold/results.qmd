@@ -1,0 +1,86 @@
+---
+title: "Normal or t cut-off for batch-means scores"
+format:
+  gfm: default
+  html: default
+execute:
+  echo: false
+  warning: false
+  message: false
+---
+
+```{r}
+#| label: setup
+library(here)
+library(fs)
+
+run_dir <- here("2026-09-28-batch-means-t-threshold")
+results_rds <- path(run_dir, "results.rds")
+if (!file_exists(results_rds)) {
+  stop(
+    "no results.rds - run 2026-09-28-batch-means-t-threshold/01-measure.R first",
+    call. = FALSE
+  )
+}
+raw <- readRDS(results_rds)
+results <- raw$results
+
+# the per-score rate the bivariate test is set for: 1% across five two-sided
+# scores
+alpha <- 0.01 / (2 * 5)
+target <- 2 * alpha
+
+rates <- do.call(
+  rbind,
+  lapply(split(results, results$n), function(d) {
+    df <- d$n_batches[1] - 1
+    data.frame(
+      n = d$n[1],
+      batches = d$n_batches[1],
+      reps = nrow(d),
+      normal = mean(d$score > qnorm(1 - alpha)),
+      t = mean(d$score > qt(1 - alpha, df))
+    )
+  })
+)
+# binomial standard error of a rate near the target, at this many replicates
+mc_se <- sqrt(target * (1 - target) / rates$reps[1])
+
+fmt <- function(x) formatC(x, format = "f", digits = 4)
+ratio <- function(x) formatC(x / target, format = "f", digits = 2)
+```
+
+## The question
+
+The bivariate normal test scores each posterior summary as
+`|estimate - truth| / MCSE`, with the MCSE from batch means, and fails a
+sampler when any of five scores passes `qnorm(1 - 0.01 / 10)`. A standard
+error estimated from `a` batch means makes the score t-distributed with `a - 1`
+degrees of freedom. Does the normal cut-off reject more often than the
+`r fmt(target)` per score it is set for, and does a t cut-off fix it?
+
+Chains are AR(1) with coefficient `r raw$ar` and mean zero,
+`r rates$reps[1]` replicates at each length.
+
+## Results
+
+| n | batches | target rate | normal cut-off | t cut-off |
+|---|---|---|---|---|
+`r paste0("| ", rates$n, " | ", rates$batches, " | ", fmt(target), " | ", fmt(rates$normal), " (", ratio(rates$normal), "x) | ", fmt(rates$t), " (", ratio(rates$t), "x) |", collapse = "\n")`
+
+Each rate has a Monte Carlo standard error of about `r fmt(mc_se)`. The normal
+cut-off rejects `r ratio(min(rates$normal))`-`r ratio(max(rates$normal))` times
+as often as intended; the t cut-off is within
+`r formatC(max(abs(rates$t - target)) / mc_se, format = "f", digits = 1)`
+standard errors of the target.
+
+## Environment
+
+`mcse()` from greta at `r raw$greta_sha`.
+
+```{r}
+#| label: environment
+#| results: asis
+source(here("R", "provenance.R"))
+cat(format_provenance(raw$provenance), sep = "\n")
+```

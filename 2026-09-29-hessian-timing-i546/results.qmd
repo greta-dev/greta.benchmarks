@@ -1,0 +1,148 @@
+---
+title: "opt(hessian = TRUE) on main and greta#843"
+format:
+  gfm: default
+  html: default
+execute:
+  echo: false
+  warning: false
+  message: false
+---
+
+```{r}
+#| label: setup
+library(here)
+library(fs)
+library(dplyr)
+library(tidyr)
+library(knitr)
+
+run_dir <- here("2026-09-29-hessian-timing-i546")
+results_rds <- path(run_dir, "results.rds")
+if (!file_exists(results_rds)) {
+  stop(
+    "no results.rds - run 2026-09-29-hessian-timing-i546/01-measure.R first",
+    call. = FALSE
+  )
+}
+raw <- readRDS(results_rds)
+results <- raw$results
+reference <- raw$branches$reference
+under_test <- raw$branches$under_test
+
+secs <- function(x) formatC(x, format = "f", digits = 2)
+shape_label <- function(kind, n) {
+  ifelse(kind == "scalars", paste(n, "scalar targets"), paste("one target of", n))
+}
+
+# median and range per cell: the range is the noise floor a difference has to
+# clear before it counts (AGENTS.md: read resolved/unresolved before ratios)
+summarised <- results |>
+  mutate(shape = shape_label(kind, n)) |>
+  group_by(branch, shape, kind, n, route) |>
+  summarise(
+    reps = n(),
+    first_median = median(first),
+    first_min = min(first),
+    first_max = max(first),
+    second_median = median(second),
+    .groups = "drop"
+  )
+```
+
+## The question
+
+greta#843 changes how `opt(hessian = TRUE)` takes hessians: one graph build for all targets rather than one per target, and TensorFlow's `pfor` jacobian only for targets of at least 100 elements, with a while loop below that. How long does `opt(hessian = TRUE)` take on `main` and on the branch, and does the threshold of 100 sit where the two jacobian routes cross?
+
+Each replicate is a fresh R process that builds the model and times `opt(hessian = TRUE)` twice: the first call, which includes TensorFlow tracing and is what a user waits for, and a second, once traced. `r raw$design$n_reps` replicates per cell.
+
+## main against the branch
+
+```{r}
+#| label: branches
+default <- summarised |> filter(route == "default")
+
+comparison <- default |>
+  select(branch, shape, kind, n, first_median, first_min, first_max) |>
+  pivot_wider(
+    names_from = branch,
+    values_from = c(first_median, first_min, first_max)
+  ) |>
+  mutate(
+    ref_median = .data[[paste0("first_median_", reference)]],
+    test_median = .data[[paste0("first_median_", under_test)]],
+    ref_min = .data[[paste0("first_min_", reference)]],
+    ref_max = .data[[paste0("first_max_", reference)]],
+    test_min = .data[[paste0("first_min_", under_test)]],
+    test_max = .data[[paste0("first_max_", under_test)]],
+    # resolved only when the two ranges do not overlap
+    resolved = test_max < ref_min | test_min > ref_max,
+    speedup = ref_median / test_median
+  ) |>
+  arrange(kind, n)
+
+kable(
+  comparison |>
+    transmute(
+      shape,
+      !!reference := paste0(secs(ref_median), " (", secs(ref_min), "-", secs(ref_max), ")"),
+      !!under_test := paste0(secs(test_median), " (", secs(test_min), "-", secs(test_max), ")"),
+      resolved,
+      speedup = ifelse(resolved, paste0(formatC(speedup, format = "f", digits = 1), "x"), "not resolved")
+    ),
+  caption = "First call to opt(hessian = TRUE), seconds: median (range)"
+)
+```
+
+```{r}
+#| label: headline
+twenty <- comparison |> filter(kind == "scalars", n == 20)
+```
+
+With 20 scalar targets, the case #546 reported, the first call takes `r secs(twenty$ref_median)` s on `r reference` and `r secs(twenty$test_median)` s on the branch (medians, `r raw$design$n_reps` replicates each; ranges `r secs(twenty$ref_min)`-`r secs(twenty$ref_max)` and `r secs(twenty$test_min)`-`r secs(twenty$test_max)`).
+
+## pfor against the while loop, on the branch
+
+```{r}
+#| label: routes
+routes <- summarised |>
+  filter(branch == under_test, route %in% c("pfor", "while")) |>
+  select(shape, kind, n, route, first_median, first_min, first_max) |>
+  pivot_wider(names_from = route, values_from = c(first_median, first_min, first_max)) |>
+  mutate(
+    faster = ifelse(first_median_while < first_median_pfor, "while loop", "pfor"),
+    resolved = first_max_while < first_min_pfor | first_min_while > first_max_pfor
+  ) |>
+  arrange(kind, n)
+
+kable(
+  routes |>
+    transmute(
+      shape,
+      pfor = paste0(secs(first_median_pfor), " (", secs(first_min_pfor), "-", secs(first_max_pfor), ")"),
+      `while loop` = paste0(secs(first_median_while), " (", secs(first_min_while), "-", secs(first_max_while), ")"),
+      faster,
+      resolved
+    ),
+  caption = "First call, seconds: median (range), each route forced"
+)
+```
+
+greta uses `pfor` for targets of at least 100 elements. The table shows which route is faster at each shape measured; the threshold is right if the while loop wins below 100 and `pfor` at or above it.
+
+## Environment
+
+```{r}
+#| label: environment
+#| results: asis
+cat(
+  paste0(
+    "- `", names(raw$shas), "` at [", substr(raw$shas, 1, 8),
+    "](https://github.com/greta-dev/greta/commit/", raw$shas, ")"
+  ),
+  sep = "\n"
+)
+cat("\n")
+source(here("R", "provenance.R"))
+cat(format_provenance(raw$provenance), sep = "\n")
+```

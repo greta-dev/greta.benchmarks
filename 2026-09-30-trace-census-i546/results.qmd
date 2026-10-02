@@ -1,0 +1,146 @@
+---
+title: "Every function greta traces, on main and greta#843"
+format:
+  gfm: default
+  html: default
+execute:
+  echo: false
+  warning: false
+  message: false
+---
+
+```{r}
+#| label: setup
+library(here)
+library(fs)
+library(dplyr)
+library(tidyr)
+library(knitr)
+
+run_dir <- here("2026-09-30-trace-census-i546")
+raw <- readRDS(path(run_dir, "results.rds"))
+census <- raw$census
+timings <- raw$timings
+
+build_order <- c("main", "branch", "fix", "fix_check")
+scenario_order <- c(
+  "model",
+  "opt",
+  "opt_adam",
+  "opt_twice",
+  "opt_hessian",
+  "mcmc",
+  "extra_samples",
+  "calculate_values",
+  "calculate_nsim"
+)
+```
+
+Four builds of greta: `main`; greta#843 as pushed (`branch`); #843 with
+`opt()`'s steps on a log-density function traced for one row (`fix`, from
+`fix.patch`); and that, with `opt()`'s check of its initial values using the
+same function (`fix_check`, from `fix-check.patch`).
+
+## The census
+
+Each call below ran in a fresh process on the linear example, with
+`tensorflow::tf_function()` wrapped to record every function greta created.
+"Functions" is how many it created, "traces" how many times they were traced
+in total, and "most" the most any one function was traced. A function traced
+more than once is retracing. `opt` is greta's default optimiser, `bfgs()`;
+`opt_adam` uses `adam()`, whose own traced step calls the log-density
+function.
+
+```{r}
+#| label: census-summary
+summary_table <- census |>
+  group_by(build, scenario) |>
+  summarise(
+    functions = n(),
+    most = max(traces),
+    traces = sum(traces),
+    .groups = "drop"
+  ) |>
+  mutate(
+    cell = sprintf("%d / %d / %d", functions, traces, most),
+    build = factor(build, build_order),
+    scenario = factor(scenario, scenario_order)
+  ) |>
+  select(scenario, build, cell) |>
+  arrange(build) |>
+  pivot_wider(names_from = build, values_from = cell) |>
+  arrange(scenario)
+kable(summary_table, caption = "functions / traces / most traces of one function")
+```
+
+Every function traced more than once, and every kind of function created more
+than once within one call. `rows` is the free state's number of rows in the
+function's signature: the log-density function's open-signature and one-row
+versions are made by the same method, and this tells them apart.
+
+```{r}
+#| label: census-detail
+census |>
+  mutate(made_by = sub("^self[$]", "", made_by)) |>
+  group_by(build, scenario, made_by, rows) |>
+  summarise(
+    created = n(),
+    most = max(traces),
+    traces = sum(traces),
+    .groups = "drop"
+  ) |>
+  filter(created > 1 | most > 1) |>
+  mutate(
+    build = factor(build, build_order),
+    scenario = factor(scenario, scenario_order)
+  ) |>
+  arrange(scenario, build) |>
+  kable()
+```
+
+## What tracing costs opt()
+
+Seconds for `opt(m, optimiser = adam(), max_iterations = 100)` on each
+example, in a fresh process: the first call, which traces, and a second,
+which reuses those traces. Medians of `r max(timings$rep)` replicates, with
+their range.
+
+```{r}
+#| label: timings
+timings |>
+  group_by(build, example) |>
+  summarise(
+    first = sprintf(
+      "%.2f (%.2f-%.2f)",
+      median(first),
+      min(first),
+      max(first)
+    ),
+    second = sprintf(
+      "%.3f (%.3f-%.3f)",
+      median(second),
+      min(second),
+      max(second)
+    ),
+    .groups = "drop"
+  ) |>
+  mutate(build = factor(build, build_order)) |>
+  arrange(example, build) |>
+  kable()
+```
+
+## Builds
+
+```{r}
+#| label: builds
+data.frame(
+  build = names(raw$builds),
+  commit = vapply(raw$builds, `[[`, "", "sha"),
+  patch = vapply(
+    raw$builds,
+    function(b) if (is.null(b$patch)) "" else b$patch,
+    ""
+  )
+) |>
+  kable(row.names = FALSE)
+```

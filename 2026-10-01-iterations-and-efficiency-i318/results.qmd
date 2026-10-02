@@ -1,0 +1,374 @@
+---
+title: "Iterations per draw, and efficiency at equal iterations"
+format:
+  html:
+    embed-resources: true
+  gfm: default
+execute:
+  echo: false
+  warning: false
+  message: false
+---
+
+```{r}
+#| label: setup
+library(here)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(knitr)
+
+run_dir <- here("2026-10-01-iterations-and-efficiency-i318")
+# check_shown_code(), which checks the model code below against R/examples.R
+source(here("R", "report.R"))
+read_all <- function(prefix) {
+  files <- list.files(
+    run_dir,
+    paste0("^", prefix, "-.*\\.rds$"),
+    full.names = TRUE
+  )
+  bind_rows(lapply(files, readRDS)) |>
+    mutate(
+      version = factor(
+        version,
+        levels = c("cran", "main", "850"),
+        labels = c("CRAN", "main", "#850")
+      )
+    )
+}
+```
+
+CRAN is greta 0.6.0 (`v0.6.0`), main is `179021a8`, and #850 is `bcbbea4d`. Each was installed in its own library and run in its own R process.
+
+## The models
+
+Normal and log-normal distributions are written with their mean and standard deviation, as greta's `normal()` and `lognormal()` take them; $\text{Cauchy}^{+}$ is a Cauchy truncated to positive values.
+
+```{r}
+#| label: check-model-code
+check_shown_code(c(
+  linear = "code-linear",
+  multiple_linear = "code-multiple-linear",
+  hierarchical_linear = "code-hierarchical-linear",
+  eight_schools = "code-eight-schools"
+))
+```
+
+### For timing: a large regression
+
+The timing in `01-time-per-draw.R` needs each iteration to cost enough to measure, so it uses a regression on 20,000 simulated observations, with the residual standard deviation known.
+
+$$
+\begin{aligned}
+y_i &\sim \text{Normal}(\alpha + \beta \, x_i, 1), \quad i = 1, \dots, 20000 \\
+\alpha, \beta &\sim \text{Normal}(0, 10)
+\end{aligned}
+$$
+
+```{r}
+#| label: code-timing-model
+#| echo: true
+#| eval: false
+set.seed(2026 - 10 - 01)
+n_observations <- 20000
+predictor <- rnorm(n_observations)
+response <- 1 + 2 * predictor + rnorm(n_observations)
+
+intercept <- normal(0, 10)
+slope <- normal(0, 10)
+distribution(response) <- normal(intercept + slope * predictor, 1)
+m <- model(intercept, slope)
+```
+
+### For efficiency: four of greta's example models
+
+From greta's `inst/examples/`, as the benchmark suite runs them.
+
+#### linear
+
+A regression of each department's rating in `attitude` on its number of complaints.
+
+$$
+\begin{aligned}
+\text{rating}_i &\sim \text{Normal}(\mu_i, \sigma), \quad i = 1, \dots, 30 \\
+\mu_i &= \alpha + \beta \, \text{complaints}_i \\
+\alpha, \beta &\sim \text{Normal}(0, 10) \\
+\sigma &\sim \text{Cauchy}^{+}(0, 3)
+\end{aligned}
+$$
+
+```{r}
+#| label: code-linear
+#| echo: true
+#| eval: false
+int <- normal(0, 10)
+coef <- normal(0, 10)
+sd <- cauchy(0, 3, truncation = c(0, Inf))
+mu <- int + coef * attitude$complaints
+distribution(attitude$rating) <- normal(mu, sd)
+m <- model(int, coef, sd)
+```
+
+#### multiple_linear
+
+The same rating on all six of `attitude`'s other columns, $X$.
+
+$$
+\begin{aligned}
+\text{rating}_i &\sim \text{Normal}(\mu_i, \sigma), \quad i = 1, \dots, 30 \\
+\mu_i &= \alpha + \sum_{j = 1}^{6} X_{ij} \, \beta_j \\
+\alpha, \beta_j &\sim \text{Normal}(0, 10) \\
+\sigma &\sim \text{Cauchy}^{+}(0, 3)
+\end{aligned}
+$$
+
+```{r}
+#| label: code-multiple-linear
+#| echo: true
+#| eval: false
+design <- as.matrix(attitude[, 2:7])
+int <- normal(0, 10)
+coefs <- normal(0, 10, dim = ncol(design))
+sd <- cauchy(0, 3, truncation = c(0, Inf))
+mu <- int + design %*% coefs
+distribution(attitude$rating) <- normal(mu, sd)
+m <- model(int, coefs, sd)
+```
+
+#### hierarchical_linear
+
+Sepal length on sepal width in `iris`, with an offset for each species, $s[i]$ being flower $i$'s. Setosa's offset is zero and the other two share a scale, $\tau$.
+
+$$
+\begin{aligned}
+\text{Sepal.Length}_i &\sim \text{Normal}(\mu_i, \sigma), \quad i = 1, \dots, 150 \\
+\mu_i &= \alpha + \beta \, \text{Sepal.Width}_i + \gamma_{s[i]} \\
+\gamma_1 &= 0, \qquad \gamma_2, \gamma_3 \sim \text{Normal}(0, \tau) \\
+\tau &\sim \text{LogNormal}(0, 1) \\
+\alpha, \beta &\sim \text{Normal}(0, 10) \\
+\sigma &\sim \text{Cauchy}^{+}(0, 3)
+\end{aligned}
+$$
+
+```{r}
+#| label: code-hierarchical-linear
+#| echo: true
+#| eval: false
+int <- normal(0, 10)
+coef <- normal(0, 10)
+sd <- cauchy(0, 3, truncation = c(0, Inf))
+species_sd <- lognormal(0, 1)
+species_offset <- normal(0, species_sd, dim = 2)
+species_effect <- rbind(0, species_offset)
+species_id <- as.numeric(iris$Species)
+mu <- int + coef * iris$Sepal.Width + species_effect[species_id]
+distribution(iris$Sepal.Length) <- normal(mu, sd)
+m <- model(int, coef, sd, species_sd, species_offset)
+```
+
+#### eight_schools
+
+The effect of coaching in eight schools, $y_j$, each measured with a known standard error, $\sigma_j$. The scale of the school effects is itself a parameter, which makes the posterior a funnel.
+
+$$
+\begin{aligned}
+y_j &\sim \text{Normal}(\theta_j, \sigma_j), \quad j = 1, \dots, 8 \\
+\theta_j &= \mu + \xi \, \eta_j \\
+\eta_j &\sim \text{Normal}(0, \sigma_\eta) \\
+\sigma_\eta &\sim \text{InverseGamma}(1, 1) \\
+\mu &\sim \text{Normal}(0, 100) \\
+\xi &\sim \text{Normal}(0, 5)
+\end{aligned}
+$$
+
+```{r}
+#| label: code-eight-schools
+#| echo: true
+#| eval: false
+y <- c(28, 8, -3, 7, -1, 1, 18, 12)
+sigma_y <- c(15, 10, 16, 11, 9, 11, 10, 18)
+N <- length(y)
+sigma_eta <- inverse_gamma(1, 1)
+eta <- normal(0, sigma_eta, dim = N)
+mu_theta <- normal(0, 100)
+xi <- normal(0, 5)
+theta <- mu_theta + xi * eta
+distribution(y) <- normal(theta, sigma_y)
+m <- model(sigma_eta, eta, mu_theta, xi)
+```
+
+## Iterations per draw
+
+`01-time-per-draw.R` times `rwmh()` on a 20,000-row regression: one chain, no warmup, three runs each of `n_samples = 3000` and `n_samples = 12000`. Milliseconds per draw is the slope between the two lengths, so each call's fixed cost, mostly tracing the sampler, cancels out.
+
+```{r}
+#| label: time-per-draw
+time_per_draw <- read_all("time-per-draw") |>
+  group_by(version, thin, n_samples) |>
+  summarise(seconds = median(seconds), .groups = "drop") |>
+  pivot_wider(
+    names_from = n_samples,
+    values_from = seconds,
+    names_prefix = "n_"
+  ) |>
+  mutate(
+    extra_draws = (12000 - 3000) / thin,
+    ms_per_draw = 1000 * (n_12000 - n_3000) / extra_draws,
+    iterations_per_draw = if_else(version == "#850", thin, thin + 1)
+  )
+
+# a draw costs an amount per iteration, plus a fixed amount for keeping it.
+# Both are fitted to main and #850 at thin = 1, where a draw is 2 and 1
+# iterations if main runs thin + 1; every other row is then a prediction
+at_thin_one <- filter(time_per_draw, thin == 1)
+ms_at_thin_one <- setNames(at_thin_one$ms_per_draw, at_thin_one$version)
+ms_per_iteration <- ms_at_thin_one[["main"]] - ms_at_thin_one[["#850"]]
+ms_per_kept_draw <- ms_at_thin_one[["#850"]] - ms_per_iteration
+
+time_per_draw <- time_per_draw |>
+  mutate(
+    predicted_ms_per_draw = iterations_per_draw * ms_per_iteration +
+      ms_per_kept_draw
+  )
+```
+
+If CRAN and main run `thin + 1` iterations per draw and #850 runs `thin`, then a draw costs `{r} round(ms_per_iteration, 3)` ms per iteration plus `{r} round(ms_per_kept_draw, 3)` ms for keeping it. Those two numbers are fitted to main and #850 at `thin = 1`. Every other point below is a prediction from them, and lands on the measurement.
+
+```{r}
+#| label: fig-time-per-draw
+#| fig-cap: "Milliseconds per kept draw. The filled dot is measured; the open circle is predicted from thin + 1 iterations per draw on CRAN and main, and thin on #850. Where the prediction is right, the dot sits inside the circle."
+#| fig-height: 3
+time_per_draw |>
+  ggplot(aes(y = version)) +
+  geom_point(aes(x = ms_per_draw), size = 2.5) +
+  geom_point(aes(x = predicted_ms_per_draw), shape = 1, size = 5) +
+  facet_wrap(~thin, labeller = label_both) +
+  labs(x = "milliseconds per draw", y = NULL)
+```
+
+<details>
+<summary>Table of time per draw, measured and predicted</summary>
+
+```{r}
+#| label: time-per-draw-table
+time_per_draw |>
+  select(
+    version,
+    thin,
+    iterations_per_draw,
+    ms_per_draw,
+    predicted_ms_per_draw
+  ) |>
+  kable(
+    digits = 3,
+    col.names = c(
+      "version",
+      "thin",
+      "iterations per draw, if thin + 1",
+      "ms per draw",
+      "predicted"
+    )
+  )
+```
+
+</details>
+
+## Efficiency at equal iterations
+
+`02-efficiency.R` runs each model 8 times, with seeds 1 to 8, as 4 chains of 2000 warmup and 2000 sampling iterations on every version: `warmup = 1000, n_samples = 1000` on CRAN and main, and `2000, 2000` on #850. A run's ESS is the smallest bulk ESS over the model's variables. Seconds include warmup. CRAN does not follow `set.seed()` in `mcmc()`, so its runs differ by more than the seed.
+
+```{r}
+#| label: efficiency
+sampling_iterations <- 2000 * 4
+
+efficiency <- read_all("efficiency") |>
+  mutate(ess_per_second = ess_bulk_min / seconds)
+```
+
+```{r}
+#| label: fig-ess
+#| fig-cap: "Every run's ESS, from 8000 sampling iterations: the small dots are single runs and the large dot is their mean."
+#| fig-height: 6
+efficiency |>
+  ggplot(aes(x = ess_bulk_min, y = version, colour = version)) +
+  geom_point(size = 1.5, alpha = 0.4) +
+  stat_summary(fun = mean, geom = "point", size = 4) +
+  facet_wrap(~example, scales = "free_x", ncol = 1) +
+  labs(x = "smallest bulk ESS over the model's variables", y = NULL) +
+  theme(legend.position = "none")
+```
+
+```{r}
+#| label: fig-ess-per-second
+#| fig-cap: "Every run's ESS per second of mcmc(), warmup included: the small dots are single runs and the large dot is their mean."
+#| fig-height: 6
+efficiency |>
+  ggplot(aes(x = ess_per_second, y = version, colour = version)) +
+  geom_point(size = 1.5, alpha = 0.4) +
+  stat_summary(fun = mean, geom = "point", size = 4) +
+  facet_wrap(~example, scales = "free_x", ncol = 1) +
+  labs(x = "ESS per second", y = NULL) +
+  theme(legend.position = "none")
+```
+
+<details>
+<summary>Table of the minimum, median and maximum over the 8 runs</summary>
+
+```{r}
+#| label: efficiency-table
+efficiency |>
+  group_by(example, version) |>
+  summarise(
+    ess_min = min(ess_bulk_min),
+    ess_median = median(ess_bulk_min),
+    ess_max = max(ess_bulk_min),
+    seconds_min = min(seconds),
+    seconds_median = median(seconds),
+    seconds_max = max(seconds),
+    ess_per_second_median = median(ess_per_second),
+    epsilon_median = median(epsilon),
+    rhat_above_1.01 = sum(rhat_max > 1.01),
+    .groups = "drop"
+  ) |>
+  kable(
+    digits = 2,
+    col.names = c(
+      "model",
+      "version",
+      "ESS min",
+      "ESS median",
+      "ESS max",
+      "seconds min",
+      "seconds median",
+      "seconds max",
+      "ESS per second, median",
+      "epsilon, median",
+      "runs with R-hat > 1.01"
+    )
+  )
+```
+
+</details>
+
+<details>
+<summary>Table of every run</summary>
+
+```{r}
+#| label: every-run
+efficiency |>
+  arrange(example, version, seed) |>
+  select(
+    example,
+    version,
+    seed,
+    seconds,
+    epsilon,
+    ess_bulk_min,
+    ess_tail_min,
+    rhat_max,
+    ess_per_second
+  ) |>
+  kable(digits = 3, row.names = FALSE)
+```
+
+</details>
