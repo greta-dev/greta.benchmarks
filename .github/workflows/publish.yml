@@ -41,6 +41,7 @@ jobs:
             any::tibble
             any::ggplot2
             any::DT
+            any::bench
 
       - uses: actions/configure-pages@v6
 

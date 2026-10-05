@@ -17,31 +17,37 @@ did.
 _quarto.yml                      the website; renders index.qmd and posts/ only
 index.qmd                        the list of posts
 posts/2026-10-05-retracing-i546/
-  run.R                          every measurement, in one cross::run_versions()
-                                 expression; run it to make results/
+  benchmark.R                    what each version runs: a flat script in
+                                 `# ---- label ----` sections
+  run.R                          runs benchmark.R for each version in each
+                                 session; run it to make results/
   results/session-<n>.rds        raw output, one file per session, committed
-  index.qmd                      reads results/, shows run.R in full
+  index.qmd                      reads results/, shows each script section
 _template/                       a post to copy
 .github/workflows/publish.yml    renders the site and deploys it to GitHub Pages
 ```
 
-A post's `run.R` holds all of the code that is measured: the models, the
-settings and the timed calls, inside one expression that
-`cross::run_versions()` evaluates in a fresh R session for each version. The
-page reads `results/` and never runs greta, and the code it shows, including
-each model's, is read out of `run.R`, so it is the code that ran.
+A post's `benchmark.R` holds all of the code that is measured: the settings,
+each model, and each timed call, as a flat script in labelled sections.
+`run.R` has `cross::run_versions()` source it in a fresh R session for each
+version, in each session. Every timing is a `bench::mark()`, looped over models
+with `bench::press()`, and is saved as the `bench_mark` object bench made, so
+`summary()` and `autoplot()` work on it. The page reads `results/` and never
+runs greta, and shows each section of the scripts by its label with
+`knitr::read_chunk()`, so the code shown is the code that ran.
 
 To make a post:
 
 1. Copy `_template/` to `posts/YYYY-MM-DD-short-name-iNNN/`.
-2. In `run.R`, pin the versions to commits and set `results_dir` to the new
-   directory. Change the models or settings if the question needs it.
+2. In `run.R`, pin the versions to commits and set `post_dir` to the new
+   directory. In `benchmark.R`, change the models or settings if the question
+   needs it.
 3. Run it: `Rscript --quiet --vanilla posts/<post>/run.R`. Sessions already in
    `results/` are skipped, so a rerun after a crash carries on.
 4. Edit `index.qmd`'s title, description and opening sentence, and look at it
    with `quarto preview`.
-5. Commit `run.R`, `results/` and `index.qmd`. HTML is not tracked: pushing to
-   main renders the site and deploys it.
+5. Commit `benchmark.R`, `run.R`, `results/` and `index.qmd`. HTML is not
+   tracked: pushing to main renders the site and deploys it.
 
 ## Layout
 
