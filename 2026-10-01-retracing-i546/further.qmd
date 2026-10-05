@@ -2,11 +2,10 @@
 #| label: further-setup
 further_dir <- fs::path_dir(params$further)
 
-singles <- lapply(
-  fs::dir_ls(further_dir, regexp = "single-run-.*[.]rds$"),
+tracing_runs <- lapply(
+  fs::dir_ls(further_dir, regexp = "tracing-run-.*-run[0-9]+[.]rds$"),
   readRDS
 )
-names(singles) <- vapply(singles, `[[`, "", "label")
 
 as_version <- function(x) factor(x, levels = versions)
 
@@ -17,43 +16,56 @@ sha_link <- function(sha) {
     sha
   )
 }
+
+tracing_versions <- bind_rows(lapply(tracing_runs, function(x) {
+  data.frame(version = x$label, branch = x$branch, sha = x$sha)
+})) |>
+  distinct() |>
+  arrange(as_version(version))
+runs_per_version <- length(tracing_runs) / nrow(tracing_versions)
 ```
 
-## One run of each model, first call in a session
+greta#546 is about tracing: the first time greta calls one of a model's TensorFlow functions in a session, TensorFlow runs greta's R code to record the function, and records it again for each input shape it has not seen. Section 1 times calls after that has happened. These runs time calls that include it.
 
-The same document, `single-run.qmd`, rendered against each version by `01-single-runs.R`, each with only that version installed:
+## Tracing in `mcmc()`
+
+`tracing-run.qmd`, rendered `r runs_per_version` times against each version by `02-tracing-runs.R`, each time in a fresh R session with only that version installed. Each render runs the five models above with `mcmc()`, `r mcmc_chains` chains of `r warmup_iterations` warmup and `r sample_iterations` sampling iterations on `r mcmc_cores` cores. Each call is the first for its model in that session, so its time includes tracing. It records how many times each of the model's three traced functions was traced, and how many retracing warnings TensorFlow logged. The documents linked are each version's last run:
 
 ```{r}
-#| label: single-run-links
+#| label: tracing-run-links
 #| output: asis
-for (version in versions) {
-  branch <- singles[[version]]$branch
+for (i in seq_len(nrow(tracing_versions))) {
   cat(sprintf(
-    "- %s: [html](single-run-%s.html), [markdown](single-run-%s.md), at %s\n",
-    version,
-    branch,
-    branch,
-    sha_link(singles[[version]]$sha)
+    "- %s: [html](tracing-run-%s.html), [markdown](tracing-run-%s.md), at %s\n",
+    tracing_versions$version[i],
+    tracing_versions$branch[i],
+    tracing_versions$branch[i],
+    sha_link(tracing_versions$sha[i])
   ))
 }
 ```
 
-Each runs the five models above with `mcmc()`, 4 chains of 1000 warmup and 1000 samples, as the first call in its R session, so the time includes tracing. It records how many times each of the model's three traced functions was traced, and how many retracing warnings TensorFlow logged. One run each.
-
 ```{r}
-#| label: single-mcmc
-single_mcmc <- bind_rows(lapply(singles, function(x) {
-  cbind(version = x$label, x$mcmc)
+#| label: tracing-mcmc
+tracing_mcmc <- bind_rows(lapply(tracing_runs, function(x) {
+  cbind(version = x$label, run = x$run, x$mcmc)
 })) |>
   mutate(
     version = as_version(version),
     model = factor(model, unique(model))
   )
 
-traces_long <- single_mcmc |>
-  select(model, version, log_prob_traces, trace_values_traces, sampler_traces) |>
+traces_long <- tracing_mcmc |>
+  select(
+    model,
+    version,
+    run,
+    log_prob_traces,
+    trace_values_traces,
+    sampler_traces
+  ) |>
   pivot_longer(
-    -c(model, version),
+    -c(model, version, run),
     names_to = "traced_function",
     values_to = "traces"
   ) |>
@@ -67,11 +79,11 @@ traces_long <- single_mcmc |>
 
 ```{r}
 #| label: fig-traces
-#| fig-cap: "How many times each of the model's traced functions was traced during one mcmc() run."
+#| fig-cap: "How many times each of the model's traced functions was traced during its first mcmc() call. One dot per run; runs with the same count overlap."
 #| fig-height: 6
 traces_long |>
   ggplot(aes(x = traces, y = version, colour = version)) +
-  geom_point(size = 3) +
+  geom_point(size = 3, alpha = 0.5) +
   facet_grid(model ~ traced_function) +
   scale_x_continuous(breaks = 0:4, limits = c(0, 4)) +
   labs(x = "traces", y = NULL) +
@@ -79,12 +91,13 @@ traces_long |>
 ```
 
 ```{r}
-#| label: fig-single-seconds
-#| fig-cap: "Seconds for one mcmc() run, first call in its session, tracing included. Each model has its own scale, starting at zero."
+#| label: fig-tracing-seconds
+#| fig-cap: "Seconds for each model's first mcmc() call, tracing included: the small dots are runs and the large dot is their mean. Each model has its own scale, starting at zero."
 #| fig-height: 5
-single_mcmc |>
+tracing_mcmc |>
   ggplot(aes(x = seconds, y = version, colour = version)) +
-  geom_point(size = 3) +
+  geom_point(size = 1.5, alpha = 0.4) +
+  stat_summary(fun = mean, geom = "point", size = 4) +
   facet_wrap(~model, ncol = 1, scales = "free_x") +
   expand_limits(x = 0) +
   labs(x = "seconds", y = NULL) +
@@ -92,15 +105,16 @@ single_mcmc |>
 ```
 
 <details>
-<summary>Table of the single runs</summary>
+<summary>Table of every run</summary>
 
 ```{r}
-#| label: single-mcmc-table
-single_mcmc |>
-  arrange(model, version) |>
+#| label: tracing-mcmc-table
+tracing_mcmc |>
+  arrange(model, version, run) |>
   select(
     model,
     version,
+    run,
     seconds,
     retracing_warnings,
     log_prob_traces,
@@ -112,6 +126,7 @@ single_mcmc |>
     col.names = c(
       "model",
       "version",
+      "run",
       "seconds",
       "retracing warnings",
       "log-prob traces",
@@ -123,7 +138,7 @@ single_mcmc |>
 
 </details>
 
-## opt(hessian = TRUE) on twenty scalar targets
+## Tracing in `opt(hessian = TRUE)`, on twenty scalar targets
 
 The model greta#546 reported: twenty observations $y_k$, simulated, each with its own mean $b_k$, so `opt(hessian = TRUE)` takes twenty hessians. greta's `variable()` gives $b_k$ a flat prior, so it has no distribution line.
 
@@ -150,16 +165,40 @@ distribution(y) <- normal(do.call(c, mget(target_names)), 1)
 m <- eval(as.call(c(quote(model), lapply(target_names, as.name))))
 ```
 
-`opt(m, hessian = TRUE)`, timed as the first call in its session in the same documents:
+`opt(m, hessian = TRUE)`, timed in the same documents, as the first `opt()` call in each session:
 
 ```{r}
-#| label: single-hessian
-bind_rows(lapply(singles, function(x) {
-  cbind(version = x$label, x$hessian)
+#| label: tracing-hessian
+tracing_hessian <- bind_rows(lapply(tracing_runs, function(x) {
+  cbind(version = x$label, run = x$run, x$hessian)
 })) |>
-  arrange(as_version(version)) |>
+  mutate(version = as_version(version))
+```
+
+```{r}
+#| label: fig-hessian
+#| fig-cap: "Seconds for opt(hessian = TRUE) on twenty scalar targets, as the first opt() call in a session: the small dots are runs and the large dot is their mean."
+#| fig-height: 2.5
+tracing_hessian |>
+  ggplot(aes(x = seconds, y = version, colour = version)) +
+  geom_point(size = 1.5, alpha = 0.4) +
+  stat_summary(fun = mean, geom = "point", size = 4) +
+  expand_limits(x = 0) +
+  labs(x = "seconds", y = NULL) +
+  theme(legend.position = "none")
+```
+
+<details>
+<summary>Table of every run</summary>
+
+```{r}
+#| label: tracing-hessian-table
+tracing_hessian |>
+  arrange(version, run) |>
   kable(
     row.names = FALSE,
-    col.names = c("version", "seconds", "retracing warnings")
+    col.names = c("version", "run", "seconds", "retracing warnings")
   )
 ```
+
+</details>

@@ -4,10 +4,44 @@ Benchmarks for [greta](https://github.com/greta-dev/greta), kept so that a speed
 claim in `NEWS.md` or in a code comment can point at the code that produced it
 rather than at a number somebody typed out.
 
-There are two halves. **The standing suite is a `targets` pipeline** at the
-repository root, run before a pull request to check a branch against `main`.
-**Dated run directories** answer one-off questions and are kept as lab notebook
-entries. The pipeline is described below; the run directories after it.
+**Posts** are the current way to benchmark, and are published as a website at
+<https://greta-dev.github.io/greta.benchmarks/>. Before them there were two
+halves, still described below: **the standing suite is a `targets` pipeline**
+at the repository root, and **dated run directories** answer one-off questions
+and are kept as lab notebook entries. They stay until the posts cover what they
+did.
+
+## Posts
+
+```
+_quarto.yml                      the website; renders index.qmd and posts/ only
+index.qmd                        the list of posts
+posts/2026-10-05-retracing-i546/
+  run.R                          every measurement, in one cross::run_versions()
+                                 expression; run it to make results/
+  results/session-<n>.rds        raw output, one file per session, committed
+  index.qmd                      reads results/, shows run.R in full
+_template/                       a post to copy
+.github/workflows/publish.yml    renders the site and deploys it to GitHub Pages
+```
+
+A post's `run.R` holds all of the code that is measured: the models, the
+settings and the timed calls, inside one expression that
+`cross::run_versions()` evaluates in a fresh R session for each version. The
+page reads `results/` and never runs greta, and the code it shows, including
+each model's, is read out of `run.R`, so it is the code that ran.
+
+To make a post:
+
+1. Copy `_template/` to `posts/YYYY-MM-DD-short-name-iNNN/`.
+2. In `run.R`, pin the versions to commits and set `results_dir` to the new
+   directory. Change the models or settings if the question needs it.
+3. Run it: `Rscript --quiet --vanilla posts/<post>/run.R`. Sessions already in
+   `results/` are skipped, so a rerun after a crash carries on.
+4. Edit `index.qmd`'s title, description and opening sentence, and look at it
+   with `quarto preview`.
+5. Commit `run.R`, `results/` and `index.qmd`. HTML is not tracked: pushing to
+   main renders the site and deploys it.
 
 ## Layout
 
@@ -88,17 +122,25 @@ Decisions the suite is waiting on are in `OPEN-QUESTIONS.md`.
 
 ### Tiers
 
-`tier` in `_targets.R` sets how hard the suite pushes. All three run all three
-tasks - a tier that skipped `mcmc()` could not catch a sampling regression, and
-that is what the suite is for.
+The tier sets how hard the suite pushes. It is read from the environment
+variable `GRETA_BENCH_TIER`, and is `quick` when that is unset:
 
-| tier | examples | `target_ess` | `reps` | `bench_iterations` | when |
-|---|---|---|---|---|---|
-| `quick` | 4 | 200 | 1 | 10 | before a commit |
-| `standard` | 5 | 500 | 1 | 30 | before a pull request |
-| `thorough` | 5 | 1000 | 3 | 50 | before a CRAN release |
+```sh
+GRETA_BENCH_TIER=flash Rscript -e 'targets::tar_make(callr_function = NULL)'
+```
 
-Measured cost, in seconds:
+Every tier runs all three tasks - a tier that skipped `mcmc()` could not catch
+a sampling regression, and that is what the suite is for.
+
+| tier | examples | `target_ess` | `reps` | `mcmc_repeats` | `bench_repeats` | when |
+|---|---|---|---|---|---|---|
+| `flash` | 1, `linear` | 200 | 5 | 10 | 10 | a first look |
+| `quick` | 4 | 200 | 3 | 5 | 10 | before a commit |
+| `standard` | 5 | 500 | 5 | 10 | 30 | before a pull request |
+| `thorough` | 5 | 1000 | 5 | 20 | 50 | before a CRAN release |
+
+Measured cost, in seconds, at the settings of 2026-09-21, which ran 1, 1 and 3
+sampling runs; sampling now costs about `reps` times as much:
 
 | tier | deterministic | sampling | per branch | two-branch comparison |
 |---|---|---|---|---|
@@ -117,9 +159,13 @@ straight:
   map to a fixed time: `cjs` reaches 4,700 on its first pass so raising its
   target is free, while `eight_schools` needs 2,400 draws for 500 and 64,180
   for 1,000.
-- **`reps`** is how many independent `mcmc()` runs per example per branch.
-- **`bench_iterations`** is how many times `bench::mark()` repeats `model()`
-  and `opt()`. Nothing to do with MCMC.
+- **`reps`** is how many times each branch runs each example's sampling
+  measurements: `mcmc()` to the ESS target, and the seeded fit.
+- **`mcmc_repeats`** is how many fixed-length `mcmc()` runs are timed per
+  example per branch; each run's ESS is kept too.
+- **`bench_repeats`** is the fewest times `bench::mark()` repeats building the
+  model and `opt()`; it stops at twice that. Nothing to do with MCMC
+  iterations.
 
 `quick` excludes `cjs`, which costs 38 s in the deterministic tier and 73-93 s
 in the sampling tier - more than half a full pass on its own. It is in

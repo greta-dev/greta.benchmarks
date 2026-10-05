@@ -12,14 +12,18 @@ source("packages.R")
 tar_source()
 
 tar_assign({
-  # "quick" before a commit, "standard" before a PR, "thorough" before a CRAN
-  # release. R/tiers.R has the settings and what each costs.
-  tier <- "quick" |> tar_target()
+  # "flash" for a first look, "quick" before a commit, "standard" before a PR,
+  # "thorough" before a CRAN release. R/tiers.R has the settings and what each
+  # costs. Chosen with GRETA_BENCH_TIER, so that a run at another tier does not
+  # mean editing this file; read on every run, because targets does not watch
+  # environment variables
+  tier <- Sys.getenv("GRETA_BENCH_TIER", "quick") |>
+    tar_target(cue = tar_cue(mode = "always"))
 
   settings <- tier_settings(tier) |> tar_target()
   example_names <- settings$examples |> tar_target()
-  bench_iterations <- settings$bench_iterations |> tar_target()
-  mcmc_iterations <- settings$mcmc_iterations |> tar_target()
+  bench_repeats <- settings$bench_repeats |> tar_target()
+  mcmc_repeats <- settings$mcmc_repeats |> tar_target()
   target_ess <- settings$target_ess |> tar_target()
   reps <- settings$reps |> tar_target()
   time_limit <- settings$time_limit |> tar_target()
@@ -63,8 +67,8 @@ tar_assign({
     target_file,
     iterations_file,
     greta_repo,
-    bench_iterations,
-    mcmc_iterations,
+    bench_repeats,
+    mcmc_repeats,
     warmup_iterations,
     sample_iterations,
     mcmc_chains,
@@ -78,20 +82,19 @@ tar_assign({
     tar_target()
 
   timings <- branch_timings(measured) |> tar_target()
+  mcmc_runs <- branch_mcmc_runs(measured) |> tar_target()
   sampling <- branch_sampling(measured) |> tar_target()
   rss <- branch_rss(measured) |> tar_target()
   iterations <- branch_iterations(measured) |> tar_target()
+  run_order <- branch_run_order(measured) |> tar_target()
 
   fits <- branch_fits(measured) |> tar_target()
   fit_draws <- tidy_fit_draws(fits) |> tar_target()
   fitted_values <- tidy_fitted(fits) |> tar_target()
   fit_diagnostics <- tidy_fit_diagnostics(fits) |> tar_target()
 
-  # bench normalises against the single fastest row in whatever it is given, so
-  # relative medians are computed per example x task - where the branch is the
-  # only thing varying.
-  timings_relative <- relative_timings(timings) |> tar_target()
-  speed <- speed_table(timings_relative, comparisons) |> tar_target()
+  every_run <- timed_runs(timings, mcmc_runs) |> tar_target()
+  speed <- speed_table(every_run, comparisons) |> tar_target()
   sampling_speed <- sampling_table(sampling, comparisons) |> tar_target()
 
   pooled_posterior <- pool_replicates(per_variable_posterior(sampling)) |>

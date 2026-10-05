@@ -8,3 +8,8 @@ _targets/
 report.html
 */results_files/*
 *.html
+# the website, rendered and deployed by .github/workflows/publish.yml
+_site/
+
+/.quarto/
+**/*.quarto_ipynb

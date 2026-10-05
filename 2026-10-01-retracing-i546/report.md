@@ -12,21 +12,26 @@ the reference.
 | main    | main                 | 179021a818 |                   2 |
 | \#843   | faster-hessians-i546 | 94ef91b919 |                   2 |
 
+Each version is measured in a process of its own, one after another.
+This run did not record the order.
+
 `mcmc()` takes a number of draws, and versions of greta can run
 different numbers of iterations per draw: greta 0.6.0 runs two at
 `thin = 1`. Each version’s iterations per draw is measured
 (`R/iterations.R`), and every `mcmc()` call is given the number of draws
-that makes the same number of iterations on every version.
+that makes the same number of iterations on every version: 2000 warmup
+and 2000 sampling iterations, on 4 chains and 4 cores.
 
 For each model, each version is measured on:
 
-1.  **Speed:** the time `model()`, `opt()`, and an `mcmc()` run of a
-    fixed number of iterations take.
-2.  **Efficiency:** the time `mcmc()` takes to reach a target effective
-    sample size.
+1.  **Speed:** the time it takes to build the model, `opt()`, and
+    `mcmc()` of a fixed number of iterations.
+2.  **Efficiency:** effective samples per second from those `mcmc()`
+    runs, and the time `mcmc()` takes to reach a target effective sample
+    size, 3 times.
 3.  **Agreement:** the difference between versions’ posterior means, in
     Monte Carlo standard errors.
-4.  **Convergence:** R-hat and effective sample size of one seeded fit.
+4.  **Convergence:** R-hat and effective sample size of 3 seeded fits.
 
 Section 5 plots each model’s fitted values and posterior densities, and
 section 6 holds any measurements particular to this run. Every `mcmc()`
@@ -217,24 +222,35 @@ m <- model(phi, p)
 
 # 1. Speed
 
-Each version runs these calls on each model, where `k` is the version’s
-iterations per draw. `model()` and `opt()` are repeated between 10 and
-20 times, and `mcmc()` between 5 and 10 times, all in one process per
-version, after each model has been built and traced once.
+Three tasks are timed on each model, all in one process per version,
+after each model has been built, optimised and sampled once so that
+nothing timed includes tracing.
+
+**`model`** runs the model’s whole code from “The models” above, from
+its first line to its call to `model()`, such as
+`m <- model(int, coef, sd)` for linear. It builds a new model each time,
+and `bench::mark()` repeats it between 10 and 20 times.
+
+**`opt`**, repeated the same way, on the model built once beforehand:
 
 ``` r
-model()
 opt(m, optimiser = adam(), max_iterations = 100)
-mcmc(m, warmup = 2000 / k, n_samples = 2000 / k, chains = 4, n_cores = 4)
+```
+
+**`mcmc`**, run 5 times and timed by hand, so that each run’s draws are
+kept for section 2. `k` is the version’s iterations per draw:
+
+``` r
+mcmc(m, warmup = 2000 / k, n_samples = 2000 / k, chains = 4, n_cores = 4, verbose = FALSE)
 ```
 
 <div id="fig-speed">
 
 ![](report_files/figure-commonmark/fig-speed-1.png)
 
-Figure 1: Every timed repeat, one row per version: the small dots are
-single repeats and the large dot is their mean. The rows in a panel do
-the same calls, so a row further right took longer. Panels are different
+Figure 1: Every timed run, one row per version: the small dots are
+single runs and the large dot is their mean. The rows in a panel do the
+same calls, so a row further right took longer. Panels are different
 tasks and models, on their own scales.
 
 </div>
@@ -248,18 +264,18 @@ Table of the median, minimum and maximum, in milliseconds
 
 | task | example | CRAN | main | \#843 |
 |:---|:---|:---|:---|:---|
-| mcmc | eight_schools | 3250.4 (3108.3-4856.3) | 3318.8 (2798.1-3450.6) | 3290.0 (3095.5-3561.2) |
-| mcmc | hierarchical_linear | 4051.9 (3812.8-4617.1) | 4197.1 (3835.5-4537.8) | 4308.5 (4232.4-4634.0) |
-| mcmc | linear | 2864.6 (2615.5-3428.6) | 2919.5 (2850.0-3321.6) | 2772.9 (2476.5-2950.0) |
-| mcmc | multiple_linear | 3064.1 (2479.5-3090.9) | 3162.4 (2518.9-4475.5) | 2927.2 (2823.0-2979.9) |
-| model | eight_schools | 22.7 (21.9-30.7) | 21.1 (20.1-28.0) | 22.1 (21.6-54.2) |
-| model | hierarchical_linear | 29.4 (28.6-61.9) | 25.9 (25.4-57.2) | 28.8 (27.9-33.5) |
-| model | linear | 19.7 (19.0-22.1) | 18.8 (17.7-22.6) | 19.7 (19.2-25.4) |
-| model | multiple_linear | 23.1 (21.4-109.0) | 20.1 (18.1-36.3) | 25.1 (19.7-118.7) |
-| opt | eight_schools | 135.2 (126.8-140.8) | 85.8 (84.5-146.4) | 81.1 (79.7-88.6) |
-| opt | hierarchical_linear | 141.6 (137.5-148.3) | 107.6 (106.5-114.9) | 104.7 (103.6-108.8) |
-| opt | linear | 126.1 (124.2-155.6) | 89.7 (76.9-188.3) | 76.1 (74.0-79.2) |
-| opt | multiple_linear | 131.3 (123.9-153.5) | 77.9 (75.8-81.5) | 83.4 (78.6-176.2) |
+| mcmc | eight_schools | 3093.2 (2721.4-3449.7) | 3196.2 (2906.7-3581.4) | 3343.7 (2945.6-3573.8) |
+| mcmc | hierarchical_linear | 3980.3 (3811.0-4469.9) | 4013.8 (3830.5-4681.7) | 4355.5 (3778.2-4637.0) |
+| mcmc | linear | 2611.7 (2334.2-2762.7) | 2734.1 (2585.7-2911.0) | 2827.5 (2668.4-3189.5) |
+| mcmc | multiple_linear | 2882.2 (2623.9-3100.9) | 2639.2 (2526.4-3117.4) | 3010.9 (2731.4-3134.5) |
+| model | eight_schools | 22.5 (21.8-32.0) | 20.5 (19.9-26.6) | 24.0 (22.8-74.8) |
+| model | hierarchical_linear | 29.3 (28.1-61.5) | 25.7 (25.4-56.0) | 29.3 (28.5-35.0) |
+| model | linear | 19.2 (19.0-22.1) | 17.8 (17.5-21.5) | 19.9 (19.5-24.0) |
+| model | multiple_linear | 19.7 (19.4-22.3) | 18.1 (17.9-24.5) | 20.6 (20.0-27.7) |
+| opt | eight_schools | 127.0 (126.4-135.1) | 82.4 (81.4-89.8) | 88.1 (84.6-96.1) |
+| opt | hierarchical_linear | 139.5 (137.6-169.8) | 107.6 (106.4-115.1) | 110.0 (108.4-116.3) |
+| opt | linear | 123.6 (122.1-147.0) | 77.0 (76.1-80.2) | 80.8 (77.9-96.0) |
+| opt | multiple_linear | 131.7 (122.0-143.6) | 77.2 (76.3-81.4) | 80.1 (78.7-184.8) |
 
 </details>
 
@@ -273,36 +289,78 @@ version named over the second
 
 | example             | task  | main vs CRAN | \#843 vs CRAN | \#843 vs main |
 |:--------------------|:------|-------------:|--------------:|--------------:|
-| eight_schools       | mcmc  |         1.02 |          1.01 |          0.99 |
-| hierarchical_linear | mcmc  |         1.04 |          1.06 |          1.03 |
-| linear              | mcmc  |         1.02 |          0.97 |          0.95 |
-| multiple_linear     | mcmc  |         1.03 |          0.96 |          0.93 |
-| eight_schools       | model |         0.93 |          0.98 |          1.05 |
-| hierarchical_linear | model |         0.89 |          0.99 |          1.11 |
-| linear              | model |         0.96 |          1.00 |          1.04 |
-| multiple_linear     | model |         0.87 |          1.00 |          1.14 |
-| eight_schools       | opt   |         0.66 |          0.62 |          0.94 |
-| hierarchical_linear | opt   |         0.76 |          0.74 |          0.97 |
-| linear              | opt   |         0.71 |          0.61 |          0.86 |
-| multiple_linear     | opt   |         0.60 |          0.64 |          1.07 |
+| eight_schools       | mcmc  |         1.03 |          1.08 |          1.05 |
+| hierarchical_linear | mcmc  |         1.01 |          1.09 |          1.09 |
+| linear              | mcmc  |         1.05 |          1.08 |          1.03 |
+| multiple_linear     | mcmc  |         0.92 |          1.04 |          1.14 |
+| eight_schools       | model |         0.91 |          1.07 |          1.17 |
+| hierarchical_linear | model |         0.88 |          1.00 |          1.14 |
+| linear              | model |         0.92 |          1.03 |          1.12 |
+| multiple_linear     | model |         0.91 |          1.04 |          1.14 |
+| eight_schools       | opt   |         0.65 |          0.69 |          1.07 |
+| hierarchical_linear | opt   |         0.77 |          0.79 |          1.02 |
+| linear              | opt   |         0.62 |          0.65 |          1.05 |
+| multiple_linear     | opt   |         0.59 |          0.61 |          1.04 |
 
 </details>
 
 # 2. Efficiency
 
+## At a fixed number of iterations
+
+The 5 timed `mcmc()` runs from section 1, each of 2000 warmup and 2000
+sampling iterations: the smallest bulk ESS over the model’s variables,
+per second of the run, warmup included.
+
+<div id="fig-fixed-efficiency">
+
+![](report_files/figure-commonmark/fig-fixed-efficiency-1.png)
+
+Figure 2: Effective samples per second for every fixed-length mcmc()
+run: the small dots are single runs and the large dot is their mean.
+
+</div>
+
+<details>
+
+<summary>
+
+Table of the minimum, median and maximum ESS and ESS per second over the
+runs
+</summary>
+
+| model | version | runs | smallest bulk ESS, median (min-max) | ESS per second, median (min-max) | runs with R-hat \> 1.01 |
+|:---|:---|---:|:---|:---|---:|
+| eight_schools | CRAN | 5 | 186 (63-235) | 54.0 (19.6-76.3) | 5 |
+| eight_schools | main | 5 | 182 (58-291) | 59.9 (19.9-91.0) | 5 |
+| eight_schools | \#843 | 5 | 289 (107-408) | 86.5 (30.0-126.2) | 4 |
+| hierarchical_linear | CRAN | 5 | 184 (35-250) | 41.2 (8.9-59.2) | 5 |
+| hierarchical_linear | main | 5 | 68 (23-262) | 17.7 (5.7-56.1) | 5 |
+| hierarchical_linear | \#843 | 5 | 171 (26-366) | 36.9 (6.6-83.1) | 5 |
+| linear | CRAN | 5 | 208 (114-605) | 83.8 (48.7-218.8) | 3 |
+| linear | main | 5 | 216 (6-665) | 78.9 (2.2-228.4) | 4 |
+| linear | \#843 | 5 | 573 (34-820) | 179.5 (12.3-273.9) | 2 |
+| multiple_linear | CRAN | 5 | 71 (19-111) | 25.8 (7.4-35.7) | 5 |
+| multiple_linear | main | 5 | 38 (11-165) | 15.0 (4.0-52.9) | 5 |
+| multiple_linear | \#843 | 5 | 64 (18-131) | 20.6 (6.1-46.9) | 5 |
+
+</details>
+
+## Time to a target ESS
+
 Seconds of sampling per 1000 effective draws: `mcmc()` with 2000 warmup
 and 2000 sampling iterations, then `extra_samples()` until the smallest
 bulk ESS over the model’s variables reaches 200 and every R-hat is below
-1.01, or until the tier’s time limit. A run that reaches the time limit
-is marked `hit_cap` in the table of sampling runs under Details.
+1.01, or until the tier’s time limit. Each version runs this 3 times per
+model. A run that reaches the time limit is marked `hit_cap` in the
+table of sampling runs under Details.
 
 <div id="fig-sampling">
 
 ![](report_files/figure-commonmark/fig-sampling-1.png)
 
-Figure 2: Seconds of sampling per 1000 effective draws. With one run per
-version and model, a bar is that run; with several, the small dots are
-runs and the large dot is their mean.
+Figure 3: Seconds of sampling per 1000 effective draws. With one run per
+version and model, a bar is that run; with several, each dot is a run.
 
 </div>
 
@@ -316,10 +374,10 @@ pair, and the number of runs
 
 | model | CRAN (s) | main (s) | \#843 (s) | main vs CRAN | \#843 vs CRAN | \#843 vs main | runs |
 |:---|---:|---:|---:|---:|---:|---:|---:|
-| eight_schools | 24.43 | 33.77 | 12.88 | 1.38 | 0.53 | 0.38 | 1 |
-| hierarchical_linear | 22.26 | 67.51 | 11.88 | 3.03 | 0.53 | 0.18 | 1 |
-| linear | 4.94 | 4.15 | 10.10 | 0.84 | 2.04 | 2.43 | 1 |
-| multiple_linear | 15.64 | 68.49 | 54.49 | 4.38 | 3.48 | 0.80 | 1 |
+| eight_schools | 9.95 | 13.96 | 11.31 | 1.40 | 1.14 | 0.81 | 3 |
+| hierarchical_linear | 28.73 | 24.34 | 37.21 | 0.85 | 1.30 | 1.53 | 3 |
+| linear | 5.80 | 10.25 | 17.41 | 1.77 | 3.00 | 1.70 | 3 |
+| multiple_linear | 26.50 | 23.70 | 41.13 | 0.89 | 1.55 | 1.74 | 3 |
 
 </details>
 
@@ -327,9 +385,9 @@ pair, and the number of runs
 
 | version | RSS (MB) |
 |:--------|---------:|
-| CRAN    |     1178 |
-| main    |     1191 |
-| \#843   |     1121 |
+| CRAN    |     1305 |
+| main    |     1016 |
+| \#843   |     1349 |
 
 - RSS is resident set size: the physical memory the measuring process
   held, in MB.
@@ -347,13 +405,13 @@ al. 2021; Magnusson et al. 2025), from the runs in section 2:
 
 $$z = \frac{\bar\theta_{\text{test}} - \bar\theta_{\text{ref}}}{\sqrt{\text{mcse}^2_{\text{test}} + \text{mcse}^2_{\text{ref}}}}$$
 
-The tables label a variable as disagreeing when $|z| > 4$.
+The table counts the variables with $|z| > 4$.
 
 <div id="fig-agreement">
 
 ![](report_files/figure-commonmark/fig-agreement-1.png)
 
-Figure 3: Every variable’s difference in means, in MCSE units, for each
+Figure 4: Every variable’s difference in means, in MCSE units, for each
 pair of versions. The shaded band is \|z\| up to 4.
 
 </div>
@@ -365,37 +423,38 @@ pair of versions. The shaded band is \|z\| up to 4.
 Table of the largest \|z\| for each model and pair of versions
 </summary>
 
-| comparison | model | variables | largest \|z\| | variables with \|z\| \> 4 | variable with the largest \|z\| | label |
-|:---|:---|---:|---:|---:|:---|:---|
-| main vs CRAN | eight_schools | 11 | 2.89 | 0 | xi | agree within Monte Carlo error |
-| main vs CRAN | hierarchical_linear | 6 | 1.22 | 0 | species_sd | agree within Monte Carlo error |
-| main vs CRAN | linear | 3 | 1.15 | 0 | sd | agree within Monte Carlo error |
-| main vs CRAN | multiple_linear | 8 | 2.06 | 0 | int | agree within Monte Carlo error |
-| \#843 vs CRAN | eight_schools | 11 | 2.18 | 0 | eta\[5,1\] | agree within Monte Carlo error |
-| \#843 vs CRAN | hierarchical_linear | 6 | 2.72 | 0 | species_sd | agree within Monte Carlo error |
-| \#843 vs CRAN | linear | 3 | 0.48 | 0 | int | agree within Monte Carlo error |
-| \#843 vs CRAN | multiple_linear | 8 | 1.21 | 0 | sd | agree within Monte Carlo error |
-| \#843 vs main | eight_schools | 11 | 2.27 | 0 | sigma_eta | agree within Monte Carlo error |
-| \#843 vs main | hierarchical_linear | 6 | 1.47 | 0 | species_offset\[2,1\] | agree within Monte Carlo error |
-| \#843 vs main | linear | 3 | 1.66 | 0 | sd | agree within Monte Carlo error |
-| \#843 vs main | multiple_linear | 8 | 2.79 | 0 | sd | agree within Monte Carlo error |
+| comparison | model | variables | largest \|z\| | variables with \|z\| \> 4 | variable with the largest \|z\| |
+|:---|:---|---:|---:|---:|:---|
+| main vs CRAN | eight_schools | 11 | 2.34 | 0 | eta\[8,1\] |
+| main vs CRAN | hierarchical_linear | 6 | 1.60 | 0 | sd |
+| main vs CRAN | linear | 3 | 0.52 | 0 | sd |
+| main vs CRAN | multiple_linear | 8 | 0.89 | 0 | coefs\[2,1\] |
+| \#843 vs CRAN | eight_schools | 11 | 1.26 | 0 | eta\[1,1\] |
+| \#843 vs CRAN | hierarchical_linear | 6 | 2.22 | 0 | coef |
+| \#843 vs CRAN | linear | 3 | 1.20 | 0 | sd |
+| \#843 vs CRAN | multiple_linear | 8 | 1.10 | 0 | sd |
+| \#843 vs main | eight_schools | 11 | 1.88 | 0 | sigma_eta |
+| \#843 vs main | hierarchical_linear | 6 | 1.53 | 0 | coef |
+| \#843 vs main | linear | 3 | 0.76 | 0 | sd |
+| \#843 vs main | multiple_linear | 8 | 1.71 | 0 | coefs\[3,1\] |
 
 </details>
 
 # 4. Convergence
 
-R-hat and effective sample size over each model’s variables, for one
-seeded fit of each model on each version: 4 chains of 2000 warmup and
-2000 sampling iterations. Versions whose `mcmc()` follows `set.seed()`
-start from the same random numbers; greta 0.6.0’s does not.
+R-hat and effective sample size over each model’s variables, for 3
+seeded fits of each model on each version, with seeds 1 to 3: 4 chains
+of 2000 warmup and 2000 sampling iterations each. Versions whose
+`mcmc()` follows `set.seed()` start each seed from the same random
+numbers; greta 0.6.0’s does not.
 
 <div id="fig-diagnostics">
 
 ![](report_files/figure-commonmark/fig-diagnostics-1.png)
 
-Figure 4: Bulk ESS of each fit over the model’s variables: the line runs
-from the smallest to the largest, the point is the median. The dashed
-line is 400. Log scale.
+Figure 5: Bulk ESS of each fit over the model’s variables, one line per
+seed: the line runs from the smallest to the largest, the point is the
+median. The dashed line is 400. Log scale.
 
 </div>
 
@@ -406,28 +465,53 @@ line is 400. Log scale.
 Table of R-hat and ESS for each fit
 </summary>
 
-| model | version | largest R-hat | bulk ESS, min | bulk ESS, median | bulk ESS, max | tail ESS, min |
-|:---|:---|---:|---:|---:|---:|---:|
-| eight_schools | CRAN | 1.019 | 243 | 973 | 1903 | 225 |
-| eight_schools | main | 1.022 | 163 | 1247 | 2727 | 81 |
-| eight_schools | \#843 | 1.022 | 163 | 1247 | 2727 | 81 |
-| hierarchical_linear | CRAN | 1.105 | 31 | 146 | 2263 | 115 |
-| hierarchical_linear | main | 1.129 | 33 | 99 | 1639 | 70 |
-| hierarchical_linear | \#843 | 1.129 | 33 | 99 | 1639 | 70 |
-| linear | CRAN | 1.014 | 299 | 307 | 2491 | 492 |
-| linear | main | 1.028 | 185 | 190 | 2003 | 381 |
-| linear | \#843 | 1.028 | 185 | 190 | 2003 | 381 |
-| multiple_linear | CRAN | 1.186 | 19 | 127 | 1170 | 58 |
-| multiple_linear | main | 1.515 | 8 | 149 | 414 | 22 |
-| multiple_linear | \#843 | 1.515 | 8 | 149 | 414 | 22 |
+| model | version | seed | largest R-hat | bulk ESS, min | bulk ESS, median | bulk ESS, max | tail ESS, min |
+|:---|:---|---:|---:|---:|---:|---:|---:|
+| eight_schools | CRAN | 1 | 1.020 | 260 | 1612 | 2687 | 362 |
+| eight_schools | CRAN | 2 | 1.032 | 95 | 2225 | 2517 | 16 |
+| eight_schools | CRAN | 3 | 1.011 | 344 | 2286 | 2735 | 274 |
+| eight_schools | main | 1 | 1.083 | 36 | 104 | 1843 | 14 |
+| eight_schools | main | 2 | 1.016 | 300 | 2360 | 2744 | 311 |
+| eight_schools | main | 3 | 1.018 | 215 | 1311 | 3150 | 219 |
+| eight_schools | \#843 | 1 | 1.083 | 36 | 104 | 1843 | 14 |
+| eight_schools | \#843 | 2 | 1.016 | 300 | 2360 | 2744 | 311 |
+| eight_schools | \#843 | 3 | 1.018 | 215 | 1311 | 3150 | 219 |
+| hierarchical_linear | CRAN | 1 | 1.028 | 138 | 258 | 3009 | 118 |
+| hierarchical_linear | CRAN | 2 | 1.025 | 70 | 86 | 2621 | 130 |
+| hierarchical_linear | CRAN | 3 | 1.026 | 110 | 184 | 2925 | 287 |
+| hierarchical_linear | main | 1 | 1.012 | 181 | 264 | 3092 | 342 |
+| hierarchical_linear | main | 2 | 1.079 | 53 | 85 | 3293 | 59 |
+| hierarchical_linear | main | 3 | 1.080 | 48 | 112 | 3190 | 144 |
+| hierarchical_linear | \#843 | 1 | 1.012 | 181 | 264 | 3092 | 342 |
+| hierarchical_linear | \#843 | 2 | 1.079 | 53 | 85 | 3293 | 59 |
+| hierarchical_linear | \#843 | 3 | 1.080 | 48 | 112 | 3190 | 144 |
+| linear | CRAN | 1 | 1.015 | 161 | 169 | 2564 | 322 |
+| linear | CRAN | 2 | 1.002 | 938 | 945 | 1256 | 1199 |
+| linear | CRAN | 3 | 1.088 | 36 | 42 | 1461 | 170 |
+| linear | main | 1 | 1.010 | 330 | 347 | 2922 | 487 |
+| linear | main | 2 | 1.003 | 1035 | 1056 | 1641 | 1635 |
+| linear | main | 3 | 1.061 | 75 | 81 | 1584 | 171 |
+| linear | \#843 | 1 | 1.010 | 330 | 347 | 2922 | 487 |
+| linear | \#843 | 2 | 1.003 | 1035 | 1056 | 1641 | 1635 |
+| linear | \#843 | 3 | 1.061 | 75 | 81 | 1584 | 171 |
+| multiple_linear | CRAN | 1 | 1.031 | 143 | 219 | 1308 | 309 |
+| multiple_linear | CRAN | 2 | 1.084 | 66 | 135 | 525 | 95 |
+| multiple_linear | CRAN | 3 | 1.118 | 24 | 60 | 660 | 66 |
+| multiple_linear | main | 1 | 1.552 | 7 | 346 | 428 | 21 |
+| multiple_linear | main | 2 | 1.050 | 84 | 185 | 1783 | 194 |
+| multiple_linear | main | 3 | 1.523 | 8 | 123 | 784 | 30 |
+| multiple_linear | \#843 | 1 | 1.552 | 7 | 346 | 428 | 21 |
+| multiple_linear | \#843 | 2 | 1.050 | 84 | 185 | 1783 | 194 |
+| multiple_linear | \#843 | 3 | 1.523 | 8 | 123 | 784 | 30 |
 
 </details>
 
 # 5. Fits
 
-The fits from section 4. Each version is a colour. The fitted values are
-each model’s expected value for the data, such as its regression line,
-not new data simulated from the model. The data are the black points.
+The seed 1 fit of each model from section 4. Each version is a colour.
+The fitted values are each model’s expected value for the data, such as
+its regression line, not new data simulated from the model. The data are
+the black points.
 
 ## linear
 
@@ -435,7 +519,7 @@ not new data simulated from the model. The data are the black points.
 
 ![](report_files/figure-commonmark/fig-fit-linear-1.png)
 
-Figure 5: The fitted line’s median and 95% interval.
+Figure 6: The fitted line’s median and 95% interval.
 
 </div>
 
@@ -443,7 +527,7 @@ Figure 5: The fitted line’s median and 95% interval.
 
 ![](report_files/figure-commonmark/fig-densities-linear-1.png)
 
-Figure 6: Posterior densities.
+Figure 7: Posterior densities.
 
 </div>
 
@@ -453,7 +537,7 @@ Figure 6: Posterior densities.
 
 ![](report_files/figure-commonmark/fig-fit-multiple-linear-1.png)
 
-Figure 7: Each fitted value’s median, 50% and 95% intervals, against the
+Figure 8: Each fitted value’s median, 50% and 95% intervals, against the
 value it fits. The dashed line is where the two are equal.
 
 </div>
@@ -462,7 +546,7 @@ value it fits. The dashed line is where the two are equal.
 
 ![](report_files/figure-commonmark/fig-densities-multiple-linear-1.png)
 
-Figure 8: Posterior densities.
+Figure 9: Posterior densities.
 
 </div>
 
@@ -472,7 +556,7 @@ Figure 8: Posterior densities.
 
 ![](report_files/figure-commonmark/fig-fit-hierarchical-linear-1.png)
 
-Figure 9: The fitted line’s median and 95% interval, by species.
+Figure 10: The fitted line’s median and 95% interval, by species.
 
 </div>
 
@@ -480,7 +564,7 @@ Figure 9: The fitted line’s median and 95% interval, by species.
 
 ![](report_files/figure-commonmark/fig-densities-hierarchical-linear-1.png)
 
-Figure 10: Posterior densities.
+Figure 11: Posterior densities.
 
 </div>
 
@@ -490,7 +574,7 @@ Figure 10: Posterior densities.
 
 ![](report_files/figure-commonmark/fig-fit-eight-schools-1.png)
 
-Figure 11: Each school’s estimated effect: median, 50% and 95%
+Figure 12: Each school’s estimated effect: median, 50% and 95%
 intervals. The black points are the observed effects.
 
 </div>
@@ -499,7 +583,7 @@ intervals. The black points are the observed effects.
 
 ![](report_files/figure-commonmark/fig-densities-eight-schools-1.png)
 
-Figure 12: Posterior densities of the first eight variables.
+Figure 13: Posterior densities of the first eight variables.
 
 </div>
 
@@ -509,41 +593,50 @@ Not measured at the quick tier.
 
 # 6. Further measurements
 
-## One run of each model, first call in a session
+greta#546 is about tracing: the first time greta calls one of a model’s
+TensorFlow functions in a session, TensorFlow runs greta’s R code to
+record the function, and records it again for each input shape it has
+not seen. Section 1 times calls after that has happened. These runs time
+calls that include it.
 
-The same document, `single-run.qmd`, rendered against each version by
-`01-single-runs.R`, each with only that version installed:
+## Tracing in `mcmc()`
 
-- CRAN: [html](single-run-v0.6.0.html),
-  [markdown](single-run-v0.6.0.md), at
+`tracing-run.qmd`, rendered 3 times against each version by
+`02-tracing-runs.R`, each time in a fresh R session with only that
+version installed. Each render runs the five models above with `mcmc()`,
+4 chains of 2000 warmup and 2000 sampling iterations on 4 cores. Each
+call is the first for its model in that session, so its time includes
+tracing. It records how many times each of the model’s three traced
+functions was traced, and how many retracing warnings TensorFlow logged.
+The documents linked are each version’s last run:
+
+- CRAN: [html](tracing-run-v0.6.0.html),
+  [markdown](tracing-run-v0.6.0.md), at
   [026efd63](https://github.com/greta-dev/greta/commit/026efd63c08893f65de582b232c0748afaf72127)
-- main: [html](single-run-main.html), [markdown](single-run-main.md), at
+- main: [html](tracing-run-main.html), [markdown](tracing-run-main.md),
+  at
   [179021a8](https://github.com/greta-dev/greta/commit/179021a818cd7282896c42b03814a53556c1d98d)
-- \#843: [html](single-run-faster-hessians-i546.html),
-  [markdown](single-run-faster-hessians-i546.md), at
+- \#843: [html](tracing-run-faster-hessians-i546.html),
+  [markdown](tracing-run-faster-hessians-i546.md), at
   [94ef91b9](https://github.com/greta-dev/greta/commit/94ef91b919300d33474aa3273cbb1f49cb989373)
-
-Each runs the five models above with `mcmc()`, 4 chains of 1000 warmup
-and 1000 samples, as the first call in its R session, so the time
-includes tracing. It records how many times each of the model’s three
-traced functions was traced, and how many retracing warnings TensorFlow
-logged. One run each.
 
 <div id="fig-traces">
 
 ![](report_files/figure-commonmark/fig-traces-1.png)
 
-Figure 13: How many times each of the model’s traced functions was
-traced during one mcmc() run.
+Figure 14: How many times each of the model’s traced functions was
+traced during its first mcmc() call. One dot per run; runs with the same
+count overlap.
 
 </div>
 
-<div id="fig-single-seconds">
+<div id="fig-tracing-seconds">
 
-![](report_files/figure-commonmark/fig-single-seconds-1.png)
+![](report_files/figure-commonmark/fig-tracing-seconds-1.png)
 
-Figure 14: Seconds for one mcmc() run, first call in its session,
-tracing included. Each model has its own scale, starting at zero.
+Figure 15: Seconds for each model’s first mcmc() call, tracing included:
+the small dots are runs and the large dot is their mean. Each model has
+its own scale, starting at zero.
 
 </div>
 
@@ -551,30 +644,60 @@ tracing included. Each model has its own scale, starting at zero.
 
 <summary>
 
-Table of the single runs
+Table of every run
 </summary>
 
-| model | version | seconds | retracing warnings | log-prob traces | trace-values traces | sampler traces |
-|:---|:---|---:|---:|---:|---:|---:|
-| linear | CRAN | 3.46 | 0 | 2 | 2 | 1 |
-| linear | main | 3.51 | 0 | 2 | 2 | 1 |
-| linear | \#843 | 3.83 | 0 | 1 | 1 | 1 |
-| multiple_linear | CRAN | 3.40 | 0 | 2 | 2 | 1 |
-| multiple_linear | main | 3.38 | 0 | 2 | 2 | 1 |
-| multiple_linear | \#843 | 3.30 | 0 | 1 | 1 | 1 |
-| hierarchical_linear | CRAN | 4.87 | 0 | 2 | 2 | 1 |
-| hierarchical_linear | main | 5.56 | 0 | 2 | 2 | 1 |
-| hierarchical_linear | \#843 | 5.15 | 0 | 1 | 1 | 1 |
-| eight_schools | CRAN | 3.60 | 0 | 2 | 2 | 1 |
-| eight_schools | main | 3.82 | 0 | 2 | 2 | 1 |
-| eight_schools | \#843 | 3.54 | 0 | 1 | 1 | 1 |
-| cjs | CRAN | 40.71 | 0 | 2 | 2 | 1 |
-| cjs | main | 36.55 | 0 | 2 | 2 | 1 |
-| cjs | \#843 | 31.85 | 0 | 1 | 1 | 1 |
+| model | version | run | seconds | retracing warnings | log-prob traces | trace-values traces | sampler traces |
+|:---|:---|---:|---:|---:|---:|---:|---:|
+| linear | CRAN | 1 | 3.51 | 0 | 2 | 2 | 1 |
+| linear | CRAN | 2 | 3.23 | 0 | 2 | 2 | 1 |
+| linear | CRAN | 3 | 3.36 | 0 | 2 | 2 | 1 |
+| linear | main | 1 | 3.35 | 0 | 2 | 2 | 1 |
+| linear | main | 2 | 3.39 | 0 | 2 | 2 | 1 |
+| linear | main | 3 | 3.39 | 0 | 2 | 2 | 1 |
+| linear | \#843 | 1 | 3.21 | 0 | 1 | 1 | 1 |
+| linear | \#843 | 2 | 3.18 | 0 | 1 | 1 | 1 |
+| linear | \#843 | 3 | 3.51 | 0 | 1 | 1 | 1 |
+| multiple_linear | CRAN | 1 | 3.30 | 0 | 2 | 2 | 1 |
+| multiple_linear | CRAN | 2 | 3.15 | 0 | 2 | 2 | 1 |
+| multiple_linear | CRAN | 3 | 3.31 | 0 | 2 | 2 | 1 |
+| multiple_linear | main | 1 | 3.37 | 0 | 2 | 2 | 1 |
+| multiple_linear | main | 2 | 3.42 | 0 | 2 | 2 | 1 |
+| multiple_linear | main | 3 | 3.35 | 0 | 2 | 2 | 1 |
+| multiple_linear | \#843 | 1 | 3.50 | 0 | 1 | 1 | 1 |
+| multiple_linear | \#843 | 2 | 3.81 | 0 | 1 | 1 | 1 |
+| multiple_linear | \#843 | 3 | 3.43 | 0 | 1 | 1 | 1 |
+| hierarchical_linear | CRAN | 1 | 4.69 | 0 | 2 | 2 | 1 |
+| hierarchical_linear | CRAN | 2 | 4.47 | 0 | 2 | 2 | 1 |
+| hierarchical_linear | CRAN | 3 | 4.70 | 0 | 2 | 2 | 1 |
+| hierarchical_linear | main | 1 | 5.57 | 0 | 2 | 2 | 1 |
+| hierarchical_linear | main | 2 | 5.36 | 0 | 2 | 2 | 1 |
+| hierarchical_linear | main | 3 | 5.35 | 0 | 2 | 2 | 1 |
+| hierarchical_linear | \#843 | 1 | 5.36 | 0 | 1 | 1 | 1 |
+| hierarchical_linear | \#843 | 2 | 5.39 | 0 | 1 | 1 | 1 |
+| hierarchical_linear | \#843 | 3 | 5.35 | 0 | 1 | 1 | 1 |
+| eight_schools | CRAN | 1 | 3.39 | 0 | 2 | 2 | 1 |
+| eight_schools | CRAN | 2 | 3.16 | 0 | 2 | 2 | 1 |
+| eight_schools | CRAN | 3 | 3.29 | 0 | 2 | 2 | 1 |
+| eight_schools | main | 1 | 3.73 | 0 | 2 | 2 | 1 |
+| eight_schools | main | 2 | 3.72 | 0 | 2 | 2 | 1 |
+| eight_schools | main | 3 | 3.70 | 0 | 2 | 2 | 1 |
+| eight_schools | \#843 | 1 | 3.68 | 0 | 1 | 1 | 1 |
+| eight_schools | \#843 | 2 | 3.62 | 0 | 1 | 1 | 1 |
+| eight_schools | \#843 | 3 | 3.73 | 0 | 1 | 1 | 1 |
+| cjs | CRAN | 1 | 39.43 | 0 | 2 | 2 | 1 |
+| cjs | CRAN | 2 | 37.88 | 0 | 2 | 2 | 1 |
+| cjs | CRAN | 3 | 37.85 | 0 | 2 | 2 | 1 |
+| cjs | main | 1 | 39.19 | 0 | 2 | 2 | 1 |
+| cjs | main | 2 | 37.15 | 0 | 2 | 2 | 1 |
+| cjs | main | 3 | 37.48 | 0 | 2 | 2 | 1 |
+| cjs | \#843 | 1 | 37.43 | 0 | 1 | 1 | 1 |
+| cjs | \#843 | 2 | 33.25 | 0 | 1 | 1 | 1 |
+| cjs | \#843 | 3 | 34.37 | 0 | 1 | 1 | 1 |
 
 </details>
 
-## opt(hessian = TRUE) on twenty scalar targets
+## Tracing in `opt(hessian = TRUE)`, on twenty scalar targets
 
 The model greta#546 reported: twenty observations $y_k$, simulated, each
 with its own mean $b_k$, so `opt(hessian = TRUE)` takes twenty hessians.
@@ -599,14 +722,39 @@ distribution(y) <- normal(do.call(c, mget(target_names)), 1)
 m <- eval(as.call(c(quote(model), lapply(target_names, as.name))))
 ```
 
-`opt(m, hessian = TRUE)`, timed as the first call in its session in the
-same documents:
+`opt(m, hessian = TRUE)`, timed in the same documents, as the first
+`opt()` call in each session:
 
-| version | seconds | retracing warnings |
-|:--------|--------:|-------------------:|
-| CRAN    |   10.99 |                  2 |
-| main    |   12.09 |                  2 |
-| \#843   |    1.75 |                  0 |
+<div id="fig-hessian">
+
+![](report_files/figure-commonmark/fig-hessian-1.png)
+
+Figure 16: Seconds for opt(hessian = TRUE) on twenty scalar targets, as
+the first opt() call in a session: the small dots are runs and the large
+dot is their mean.
+
+</div>
+
+<details>
+
+<summary>
+
+Table of every run
+</summary>
+
+| version | run | seconds | retracing warnings |
+|:--------|----:|--------:|-------------------:|
+| CRAN    |   1 |   11.34 |                  2 |
+| CRAN    |   2 |   10.54 |                  2 |
+| CRAN    |   3 |   10.47 |                  2 |
+| main    |   1 |   12.16 |                  2 |
+| main    |   2 |   13.43 |                  2 |
+| main    |   3 |   12.04 |                  2 |
+| \#843   |   1 |    2.00 |                  0 |
+| \#843   |   2 |    1.93 |                  0 |
+| \#843   |   3 |    1.87 |                  0 |
+
+</details>
 
 # Details
 
@@ -616,18 +764,42 @@ same documents:
 
 |  | version | example | rep | elapsed | mcmc_iterations | ess_bulk_min | ess_bulk_median | rhat_max | n_variables | hit_cap |
 |:---|:---|:---|---:|---:|---:|---:|---:|---:|---:|:---|
-| linear…1 | CRAN | linear | 1 | 3.30 | 2000 | 668.68 | 668.82 | 1.00 | 3 | FALSE |
-| multiple_linear…2 | CRAN | multiple_linear | 1 | 9.43 | 13066 | 602.96 | 1186.39 | 1.01 | 8 | FALSE |
-| hierarchical_linear…3 | CRAN | hierarchical_linear | 1 | 9.85 | 5466 | 442.58 | 568.81 | 1.01 | 6 | FALSE |
-| eight_schools…4 | CRAN | eight_schools | 1 | 8.23 | 5804 | 336.94 | 4049.44 | 1.01 | 11 | FALSE |
-| linear…5 | main | linear | 1 | 3.72 | 2000 | 896.80 | 951.41 | 1.00 | 3 | FALSE |
-| multiple_linear…6 | main | multiple_linear | 1 | 26.09 | 42000 | 380.95 | 5022.17 | 1.00 | 8 | FALSE |
-| hierarchical_linear…7 | main | hierarchical_linear | 1 | 41.23 | 25358 | 610.62 | 1990.53 | 1.01 | 6 | FALSE |
-| eight_schools…8 | main | eight_schools | 1 | 25.57 | 14534 | 757.21 | 1557.25 | 1.01 | 11 | FALSE |
-| linear…9 | \#843 | linear | 1 | 3.76 | 3000 | 372.38 | 393.21 | 1.01 | 3 | FALSE |
-| multiple_linear…10 | \#843 | multiple_linear | 1 | 22.68 | 18022 | 416.15 | 1780.45 | 1.01 | 8 | FALSE |
-| hierarchical_linear…11 | \#843 | hierarchical_linear | 1 | 5.57 | 2600 | 468.82 | 688.11 | 1.01 | 6 | FALSE |
-| eight_schools…12 | \#843 | eight_schools | 1 | 5.30 | 4054 | 411.19 | 4065.57 | 1.01 | 11 | FALSE |
+| linear…1 | CRAN | linear | 1 | 2.86 | 2000 | 395.91 | 407.21 | 1.01 | 3 | FALSE |
+| multiple_linear…2 | CRAN | multiple_linear | 1 | 6.46 | 6430 | 231.22 | 677.29 | 1.01 | 8 | FALSE |
+| hierarchical_linear…3 | CRAN | hierarchical_linear | 1 | 12.00 | 9914 | 417.78 | 709.23 | 1.01 | 6 | FALSE |
+| eight_schools…4 | CRAN | eight_schools | 1 | 3.62 | 2400 | 330.73 | 1559.33 | 1.01 | 11 | FALSE |
+| linear1…5 | CRAN | linear | 2 | 3.01 | 2000 | 520.15 | 537.81 | 1.00 | 3 | FALSE |
+| multiple_linear1…6 | CRAN | multiple_linear | 2 | 5.42 | 5266 | 219.55 | 595.78 | 1.01 | 8 | FALSE |
+| hierarchical_linear1…7 | CRAN | hierarchical_linear | 2 | 7.05 | 4080 | 253.87 | 367.82 | 1.01 | 6 | FALSE |
+| eight_schools1…8 | CRAN | eight_schools | 2 | 6.36 | 4400 | 638.55 | 4651.07 | 1.01 | 11 | FALSE |
+| linear2…9 | CRAN | linear | 3 | 2.99 | 2000 | 589.55 | 600.69 | 1.01 | 3 | FALSE |
+| multiple_linear2…10 | CRAN | multiple_linear | 3 | 12.85 | 14106 | 484.95 | 955.87 | 1.01 | 8 | FALSE |
+| hierarchical_linear2…11 | CRAN | hierarchical_linear | 3 | 23.31 | 18104 | 483.27 | 590.43 | 1.01 | 6 | FALSE |
+| eight_schools2…12 | CRAN | eight_schools | 3 | 3.22 | 2000 | 455.49 | 1654.59 | 1.01 | 11 | FALSE |
+| linear…13 | main | linear | 1 | 4.16 | 3792 | 316.81 | 336.85 | 1.01 | 3 | FALSE |
+| multiple_linear…14 | main | multiple_linear | 1 | 7.71 | 10608 | 325.29 | 931.27 | 1.01 | 8 | FALSE |
+| hierarchical_linear…15 | main | hierarchical_linear | 1 | 8.43 | 4874 | 534.37 | 629.15 | 1.01 | 6 | FALSE |
+| eight_schools…16 | main | eight_schools | 1 | 6.52 | 4514 | 435.72 | 2205.87 | 1.01 | 11 | FALSE |
+| linear1…17 | main | linear | 2 | 3.96 | 3000 | 386.58 | 415.12 | 1.01 | 3 | FALSE |
+| multiple_linear1…18 | main | multiple_linear | 2 | 9.27 | 13600 | 742.60 | 956.14 | 1.01 | 8 | FALSE |
+| hierarchical_linear1…19 | main | hierarchical_linear | 2 | 7.06 | 3818 | 290.18 | 458.48 | 1.01 | 6 | FALSE |
+| eight_schools1…20 | main | eight_schools | 2 | 3.91 | 2000 | 280.37 | 2466.05 | 1.01 | 11 | FALSE |
+| linear2…21 | main | linear | 3 | 3.87 | 3000 | 574.75 | 596.58 | 1.01 | 3 | FALSE |
+| multiple_linear2…22 | main | multiple_linear | 3 | 25.48 | 42000 | 369.16 | 4300.49 | 1.01 | 8 | FALSE |
+| hierarchical_linear2…23 | main | hierarchical_linear | 3 | 36.51 | 17818 | 678.91 | 1694.52 | 1.01 | 6 | FALSE |
+| eight_schools2…24 | main | eight_schools | 3 | 11.39 | 7292 | 954.53 | 7288.88 | 1.01 | 11 | FALSE |
+| linear…25 | \#843 | linear | 1 | 3.67 | 2630 | 210.67 | 221.42 | 1.00 | 3 | FALSE |
+| multiple_linear…26 | \#843 | multiple_linear | 1 | 35.46 | 55976 | 225.58 | 6896.17 | 1.00 | 8 | FALSE |
+| hierarchical_linear…27 | \#843 | hierarchical_linear | 1 | 17.78 | 12436 | 433.40 | 907.67 | 1.01 | 6 | FALSE |
+| eight_schools…28 | \#843 | eight_schools | 1 | 4.03 | 2750 | 260.60 | 2140.07 | 1.01 | 11 | FALSE |
+| linear1…29 | \#843 | linear | 2 | 6.42 | 6420 | 304.71 | 321.01 | 1.01 | 3 | FALSE |
+| multiple_linear1…30 | \#843 | multiple_linear | 2 | 10.66 | 12068 | 449.35 | 869.38 | 1.01 | 8 | FALSE |
+| hierarchical_linear1…31 | \#843 | hierarchical_linear | 2 | 12.91 | 11802 | 346.82 | 465.27 | 1.01 | 6 | FALSE |
+| eight_schools1…32 | \#843 | eight_schools | 2 | 3.72 | 2000 | 329.00 | 1377.29 | 1.01 | 11 | FALSE |
+| linear2…33 | \#843 | linear | 3 | 3.12 | 2000 | 456.24 | 513.24 | 1.01 | 3 | FALSE |
+| multiple_linear2…34 | \#843 | multiple_linear | 3 | 25.41 | 15764 | 617.74 | 1663.31 | 1.01 | 8 | FALSE |
+| hierarchical_linear2…35 | \#843 | hierarchical_linear | 3 | 8.65 | 4498 | 309.50 | 565.85 | 1.01 | 6 | FALSE |
+| eight_schools2…36 | \#843 | eight_schools | 3 | 3.48 | 2400 | 308.52 | 1774.56 | 1.01 | 11 | FALSE |
 
 ## Posteriors
 
@@ -639,7 +811,7 @@ widest variables, from the runs in section 2.
 <img src="report_files/figure-commonmark/fig-intervals-1.png"
 id="fig-intervals" />
 
-Figure 15
+Figure 17
 
 </div>
 
@@ -692,14 +864,16 @@ Carlo noise (Magnusson et al. 2025). A two-sample Kolmogorov-Smirnov
 test on the draws is not used: it assumes both samples are independent
 draws, and MCMC draws are autocorrelated, so a correct sampler is
 rejected too often (Talts et al. 2018). With one $z$ per variable, the
-largest of many exceeds 2 routinely, so the label threshold is 4.
+largest of many exceeds 2 routinely, so the table counts variables
+beyond 4.
 
 **Timing.** Timing noise is one-sided (Chen and Revels 2016): a run can
-be slowed by something else on the machine, never sped up. The speed
-plot shows every repeat so the spread can be read beside the mean. A
-single sampling run per version cannot separate a difference from
-run-to-run variation; the thorough tier runs three. Effect sizes are
-reported rather than significance tests (Kalibera and Jones 2013).
+be slowed by something else on the machine, never sped up. The plots
+show every run so the spread can be read beside the mean. Sampling
+measurements vary between runs of the same version, so each is repeated:
+three times at the quick tier and five at the standard and thorough.
+Effect sizes are reported rather than significance tests (Kalibera and
+Jones 2013).
 
 **What is not measured.** Gradient evaluations are not counted, so a
 difference in wall time cannot be split into fewer gradients and cheaper

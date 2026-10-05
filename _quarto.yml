@@ -1,0 +1,41 @@
+project:
+  type: website
+  # only the site's pages: the dated directories, report.qmd and the targets
+  # pipeline are not part of the site
+  render:
+    - index.qmd
+    - posts/*/index.qmd
+
+website:
+  title: "benchmarks"
+  description: "Speed and posterior checks for versions of greta"
+  site-url: https://greta-dev.github.io/greta.benchmarks/
+  repo-url: https://github.com/greta-dev/greta.benchmarks
+  favicon: images/favicon-96x96.png
+  # the navbar of greta's pkgdown sites: the greta wordmark, pinned to the top,
+  # with the forum and GitHub on the right
+  navbar:
+    logo: images/name_icon_on_white.png
+    logo-alt: "greta"
+    pinned: true
+    left:
+      - href: index.qmd
+        text: Posts
+      - href: https://greta-dev.github.io/greta/
+        text: greta
+    right:
+      - icon: chat-dots
+        href: https://forum.greta-stats.org
+        aria-label: greta forum
+      - icon: github
+        href: https://github.com/greta-dev/greta.benchmarks
+        aria-label: GitHub
+
+format:
+  html:
+    theme: [default, styles.scss]
+    toc: true
+    code-fold: true
+    code-summary: "Code"
+    fig-width: 8
+    fig-height: 5

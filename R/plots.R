@@ -2,13 +2,16 @@
 # values against the data, with every branch drawn on the same axes so they
 # can be compared directly. tidy_*() reshape branch_fits() into long data
 # frames, which are targets; gg_*() build a ggplot from them and write nothing.
+#
+# branch_fits() holds several seeded fits per example. The plots draw the first
+# of them, seed 1; tidy_fit_diagnostics() covers every one.
 
-#' Every draw of every variable, one row per draw.
+#' Every draw of every variable from the seed 1 fit, one row per draw.
 tidy_fit_draws <- function(fits) {
   parts <- list()
   for (branch in names(fits)) {
     for (example in names(fits[[branch]])) {
-      draws <- as.data.frame(fits[[branch]][[example]]$draws)
+      draws <- as.data.frame(fits[[branch]][[example]][[1]]$draws)
       long <- pivot_longer(
         draws,
         -c(.chain, .iteration, .draw),
@@ -26,13 +29,13 @@ tidy_fit_draws <- function(fits) {
   out
 }
 
-#' Every kept draw of every fitted value, with the data point, predictor and
-#' group it belongs to.
+#' Every kept draw of every fitted value from the seed 1 fit, with the data
+#' point, predictor and group it belongs to.
 tidy_fitted <- function(fits) {
   parts <- list()
   for (branch in names(fits)) {
     for (example in names(fits[[branch]])) {
-      fit <- fits[[branch]][[example]]
+      fit <- fits[[branch]][[example]][[1]]
       out <- fit$fitted
       out$branch <- branch
       out$example <- example
@@ -57,27 +60,30 @@ tidy_fitted <- function(fits) {
   out
 }
 
-#' Each seeded fit's worst R-hat, the minimum, median and maximum bulk ESS over
-#' its variables, and its smallest tail ESS.
+#' Every seeded fit's worst R-hat, the minimum, median and maximum bulk ESS
+#' over its variables, and its smallest tail ESS.
 tidy_fit_diagnostics <- function(fits) {
   parts <- list()
   for (branch in names(fits)) {
     for (example in names(fits[[branch]])) {
-      summ <- posterior::summarise_draws(
-        fits[[branch]][[example]]$draws,
-        "rhat",
-        "ess_bulk",
-        "ess_tail"
-      )
-      parts[[length(parts) + 1]] <- data.frame(
-        example = example,
-        branch = branch,
-        rhat_max = max(summ$rhat),
-        ess_bulk_min = min(summ$ess_bulk),
-        ess_bulk_median = median(summ$ess_bulk),
-        ess_bulk_max = max(summ$ess_bulk),
-        ess_tail_min = min(summ$ess_tail)
-      )
+      for (seed in seq_along(fits[[branch]][[example]])) {
+        summ <- posterior::summarise_draws(
+          fits[[branch]][[example]][[seed]]$draws,
+          "rhat",
+          "ess_bulk",
+          "ess_tail"
+        )
+        parts[[length(parts) + 1]] <- data.frame(
+          example = example,
+          branch = branch,
+          seed = seed,
+          rhat_max = max(summ$rhat),
+          ess_bulk_min = min(summ$ess_bulk),
+          ess_bulk_median = median(summ$ess_bulk),
+          ess_bulk_max = max(summ$ess_bulk),
+          ess_tail_min = min(summ$ess_tail)
+        )
+      }
     }
   }
   out <- bind_rows(parts)

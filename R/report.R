@@ -69,13 +69,27 @@ render_report <- function(store, out_dir, title, further = "") {
   )
 }
 
-#' Every timed repeat as its own row, in seconds.
-timed_repeats <- function(timings) {
-  timings |>
+#' Every timed run as its own row, in seconds: the model() and opt() repeats
+#' from bench::mark(), and the fixed-length mcmc() runs.
+timed_runs <- function(timings, mcmc_runs) {
+  bench_runs <- timings |>
     as_tibble() |>
     mutate(seconds = lapply(time, as.numeric)) |>
     select(example, task, branch, seconds) |>
     unnest(seconds)
+  mcmc_timed <- mcmc_runs |>
+    mutate(task = "mcmc") |>
+    select(example, task, branch, seconds)
+  bind_rows(bench_runs, mcmc_timed)
+}
+
+#' A note for a model's subsection when the tier did not measure it, or nothing
+#' when it did.
+unmeasured_note <- function(name, example_names, tier) {
+  if (name %in% example_names) {
+    return("")
+  }
+  paste0("Not measured at the ", tier, " tier.")
 }
 
 #' A sentence giving an example's parameter count: the number of values

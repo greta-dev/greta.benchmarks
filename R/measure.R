@@ -9,7 +9,7 @@
 # temporary library that is discarded when the call returns, with no caching
 # between calls. Two calls meant installing every branch twice per run.
 #
-# The cost is coupled invalidation - changing bench_iterations re-runs the
+# The cost is coupled invalidation - changing bench_repeats re-runs the
 # sampling tier too - which is why the returned list is unpacked into separate
 # targets rather than consumed whole.
 
@@ -28,8 +28,8 @@ measure_branches <- function(
   target_file,
   iterations_file,
   greta_repo,
-  bench_iterations,
-  mcmc_iterations,
+  bench_repeats,
+  mcmc_repeats,
   warmup_iterations,
   sample_iterations,
   mcmc_chains,
@@ -42,6 +42,13 @@ measure_branches <- function(
 ) {
   branches <- shas$branch
   stop_if_moved(shas, greta_repo)
+
+  # cross installs every branch, then measures them one after another, so
+  # anything that drifts over a run (heat, other load) falls on the branches
+  # measured last. The order changes from run to run so that is not always the
+  # same branch. targets fixes each target's random seed, so the order is drawn
+  # from the clock
+  run_order <- withr::with_seed(as.integer(Sys.time()), sample(branches))
 
   body <- bquote({
     library(greta)
@@ -76,10 +83,9 @@ measure_branches <- function(
       ))
     }
 
-    # model() and opt() run in tens of milliseconds; a realistic mcmc() run
-    # takes seconds. One bench::mark() applies a single iteration count to all
-    # of them, so they are measured separately and recombined - otherwise the
-    # count that suits the cheap tasks makes the tier unaffordable.
+    # building a model and opt() take tens of milliseconds, so bench::mark()
+    # repeats them; the `model` task runs the example's whole code, ending in
+    # its call to model()
     fast <- bench::press(
       example = names(built),
       {
@@ -93,40 +99,47 @@ measure_branches <- function(
           # memory is in the TensorFlow graph, where it cannot look. RSS is
           # collected per run below instead.
           memory = FALSE,
-          min_iterations = .(bench_iterations),
-          max_iterations = .(bench_iterations) * 2L
+          min_iterations = .(bench_repeats),
+          max_iterations = .(bench_repeats) * 2L
         )
       }
     )
+    timings <- bench::as_bench_mark(fast)
 
-    # the same iterations on every branch, which is deterministic work and so
-    # measures what one run costs. The sampling tier
-    # below answers the different question of what reaching a quality target
-    # costs, and cannot separate per-iteration cost from how well the chain
-    # happened to mix.
-    slow <- bench::press(
+    # the same iterations on every branch, so each run is the same work and
+    # its time is what one run costs. Timed by hand rather than by
+    # bench::mark(), which discards what it times, so each run's draws give
+    # their ESS too: efficiency at a fixed number of iterations
+    run_mcmc_once <- function(example, run) {
+      start <- bench::hires_time()
+      draws <- mcmc(
+        built[[example]],
+        n_samples = sample_draws,
+        warmup = warmup_draws,
+        chains = .(mcmc_chains),
+        n_cores = .(as.integer(mcmc_cores)),
+        verbose = FALSE
+      )
+      seconds <- bench::hires_time() - start
+      summ <- posterior_summary(draws)
+      data.frame(
+        example = example,
+        run = run,
+        seconds = seconds,
+        ess_bulk_min = min(summ$ess_bulk),
+        ess_bulk_median = stats::median(summ$ess_bulk),
+        rhat_max = max(summ$rhat)
+      )
+    }
+    mcmc_grid <- expand.grid(
+      run = seq_len(.(mcmc_repeats)),
       example = names(built),
-      {
-        m <- built[[example]]
-        bench::mark(
-          mcmc = mcmc(
-            m,
-            n_samples = sample_draws,
-            warmup = warmup_draws,
-            chains = .(mcmc_chains),
-            n_cores = .(as.integer(mcmc_cores)),
-            verbose = FALSE
-          ),
-          check = FALSE,
-          filter_gc = FALSE,
-          memory = FALSE,
-          min_iterations = .(mcmc_iterations),
-          max_iterations = .(mcmc_iterations) * 2L
-        )
-      }
+      stringsAsFactors = FALSE
     )
-
-    timings <- bench::as_bench_mark(rbind(fast, slow))
+    mcmc_runs <- do.call(
+      rbind,
+      Map(run_mcmc_once, mcmc_grid$example, mcmc_grid$run)
+    )
 
     grid <- expand.grid(
       example = names(examples),
@@ -141,9 +154,11 @@ measure_branches <- function(
           row <- sample_to_target(
             examples[[example]](),
             target_ess = .(target_ess),
+            chains = .(mcmc_chains),
             warmup = warmup_draws,
             initial_samples = sample_draws,
-            time_limit = .(time_limit)
+            time_limit = .(time_limit),
+            n_cores = .(as.integer(mcmc_cores))
           )
           row$mcmc_iterations <- row$mcmc_samples * iterations_per_kept_draw
           cbind(example = example, rep = rep, row)
@@ -153,12 +168,13 @@ measure_branches <- function(
       )
     )
 
-    # one seeded fit per example, kept whole for the report's plots of draws
-    # and fitted values. Run last, so it cannot disturb any timing above
-    fits <- lapply(examples, function(example_fn) {
+    # `reps` seeded fits per example, seeds 1 to reps, kept whole for the
+    # report's convergence diagnostics and plots of draws and fitted values.
+    # Run last, so they cannot disturb any timing above
+    fit_once <- function(example_fn, seed) {
       m <- example_fn()
       fit <- attr(m, "fit")
-      set.seed(2026 - 09 - 30)
+      set.seed(seed)
       draws <- mcmc(
         m,
         n_samples = sample_draws,
@@ -183,10 +199,14 @@ measure_branches <- function(
         x_label = fit$x_label,
         style = fit$style
       )
+    }
+    fits <- lapply(examples, function(example_fn) {
+      lapply(seq_len(.(reps)), function(seed) fit_once(example_fn, seed))
     })
 
     list(
       timings = timings,
+      mcmc_runs = mcmc_runs,
       sampling = sampling,
       rss_mb = rss_mb(),
       fits = fits,
@@ -198,15 +218,26 @@ measure_branches <- function(
     cross::run_branches(
       .(body),
       current = FALSE,
-      branches = .(branches),
+      branches = .(run_order),
       args_callr = list(env = callr::rcmd_safe_env())
     )
   )
 
   measured <- with_dir(greta_repo, eval(call))
   stop_if_moved(shas, greta_repo)
+  measured$measured_order <- seq_len(nrow(measured))
+  # back in the order the pipeline lists the branches, which the report keeps
+  measured <- measured[match(branches, measured$branch), ]
   measured$branch <- shas$label[match(measured$branch, shas$branch)]
   measured
+}
+
+#' The order each branch was measured in, in this run: 1 is first.
+branch_run_order <- function(measured) {
+  data.frame(
+    branch = factor(measured$branch, levels = measured$branch),
+    measured_order = measured$measured_order
+  )
 }
 
 # checked before and after measuring, so the commits recorded in `shas` are
@@ -223,7 +254,7 @@ stop_if_moved <- function(shas, greta_repo) {
   }
 }
 
-#' The deterministic tier, recombined across branches.
+#' The model() and opt() timings, recombined across branches.
 #'
 #' bench_branches() is run_branches() plus this recombination; doing it here is
 #' what lets one cross call serve both tiers. as_bench_mark() restores the
@@ -234,7 +265,15 @@ branch_timings <- function(measured) {
   out$branch <- factor(out$branch, levels = measured$branch)
   out <- bench::as_bench_mark(out)
   out$task <- as.character(out$expression)
-  out$engine <- c(model = NA_character_, opt = "adam", mcmc = "hmc")[out$task]
+  out$engine <- c(model = NA_character_, opt = "adam")[out$task]
+  out
+}
+
+#' Every fixed-length mcmc() run, with its time and its ESS, across branches.
+branch_mcmc_runs <- function(measured) {
+  parts <- lapply(measured$result, function(x) x$mcmc_runs)
+  out <- bind_rows(setNames(parts, measured$branch), .id = "branch")
+  out$branch <- factor(out$branch, levels = measured$branch)
   out
 }
 
@@ -248,7 +287,8 @@ branch_sampling <- function(measured) {
   out
 }
 
-#' One seeded fit per example, per branch: draws, fitted values, and the data.
+#' The seeded fits, per branch and example, one per seed: draws, fitted values,
+#' and the data.
 branch_fits <- function(measured) {
   setNames(lapply(measured$result, function(x) x$fits), measured$branch)
 }

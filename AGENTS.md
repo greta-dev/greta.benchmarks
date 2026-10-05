@@ -13,6 +13,27 @@ terminal, not in `Rscript -e`, not in a scratch file that gets deleted.
 - Exploration in the console is fine. The moment its output is worth showing to
 someone, the code goes in a file. It should be run in order for it to be reporetd.
 
+### Posts
+
+New benchmarks are posts, in `posts/YYYY-MM-DD-short-name-iNNN/`, copied from
+`_template/`. See the README for the layout.
+
+- **Everything measured is inside `run.R`'s `benchmark` expression**: models,
+  settings and timed calls. No helpers from `R/` and nothing sourced, so a
+  reader sees all of the code that ran.
+- **The page shows code by reading it out of `run.R`**, with `parse()` and
+  source references, not by copying it. A copy drifts; a read cannot.
+- **The page never runs greta.** It reads `results/`, so rendering is cheap and
+  the GitHub Actions workflow needs no Python.
+- **Do not track HTML.** The workflow renders the site and deploys it to GitHub
+  Pages.
+- **Smoke-run `run.R` first**, from a scratch copy with small settings and one
+  version, and render the page against that before the full run.
+- **Leave the machine idle while `run.R` runs.** Rendering a page, a smoke
+  test or a browser alongside it lands in the timings. If something did run
+  alongside, delete those sessions' files and rerun `run.R`, which makes only
+  the missing sessions.
+
 ### Run directories
 
 - One directory per run, named for its date and its question. For example: "2026-09-20-tune-diag-sd" is so named because it was on the 20th September 2026, and it is related to the function tune_diag_sd(). If there is an issue number attached to it, that should be appended. So the pattern is:

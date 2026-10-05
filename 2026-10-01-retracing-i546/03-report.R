@@ -1,6 +1,6 @@
 # Render the report template, report.qmd, from this run's store, with the
-# single runs from 01-single-runs.R as its further measurements, to report.html
-# and report.md here.
+# tracing runs from 02-tracing-runs.R as its further measurements, to
+# report.html and report.md here.
 #
 #   Rscript --quiet --vanilla 2026-10-01-retracing-i546/03-report.R
 

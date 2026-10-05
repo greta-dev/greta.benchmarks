@@ -18,8 +18,8 @@ tar_assign({
 
   settings <- tier_settings(tier) |> tar_target()
   example_names <- settings$examples |> tar_target()
-  bench_iterations <- settings$bench_iterations |> tar_target()
-  mcmc_iterations <- settings$mcmc_iterations |> tar_target()
+  bench_repeats <- settings$bench_repeats |> tar_target()
+  mcmc_repeats <- settings$mcmc_repeats |> tar_target()
   target_ess <- settings$target_ess |> tar_target()
   reps <- settings$reps |> tar_target()
   time_limit <- settings$time_limit |> tar_target()
@@ -63,8 +63,8 @@ tar_assign({
     target_file,
     iterations_file,
     greta_repo,
-    bench_iterations,
-    mcmc_iterations,
+    bench_repeats,
+    mcmc_repeats,
     warmup_iterations,
     sample_iterations,
     mcmc_chains,
@@ -78,6 +78,7 @@ tar_assign({
     tar_target()
 
   timings <- branch_timings(measured) |> tar_target()
+  mcmc_runs <- branch_mcmc_runs(measured) |> tar_target()
   sampling <- branch_sampling(measured) |> tar_target()
   rss <- branch_rss(measured) |> tar_target()
   iterations <- branch_iterations(measured) |> tar_target()
@@ -87,11 +88,8 @@ tar_assign({
   fitted_values <- tidy_fitted(fits) |> tar_target()
   fit_diagnostics <- tidy_fit_diagnostics(fits) |> tar_target()
 
-  # bench normalises against the single fastest row in whatever it is given, so
-  # relative medians are computed per example x task - where the branch is the
-  # only thing varying.
-  timings_relative <- relative_timings(timings) |> tar_target()
-  speed <- speed_table(timings_relative, comparisons) |> tar_target()
+  every_run <- timed_runs(timings, mcmc_runs) |> tar_target()
+  speed <- speed_table(every_run, comparisons) |> tar_target()
   sampling_speed <- sampling_table(sampling, comparisons) |> tar_target()
 
   pooled_posterior <- pool_replicates(per_variable_posterior(sampling)) |>
@@ -106,5 +104,4 @@ tar_assign({
   agreement <- posterior_agreement(posterior_comparison) |> tar_target()
 
   provenance <- host_provenance() |> tar_target()
-
 })

@@ -1,45 +1,93 @@
----
-title: "One run of each model, on `r params$label`"
-format: gfm
-params:
-  label: "main"
-  branch: "main"
-  sha: ""
-  out_rds: ""
-execute:
-  warning: true
-  message: false
----
+# Tracing run of each model, on \#843
 
-This document is rendered once per version by `01-single-runs.R`, each time
-against that version's greta, installed on its own: CRAN (greta 0.6.0), main,
-and greta#843. The numbers are one run each. The report, `report.html`, puts
-the three side by side.
+
+This document is rendered 3 times per version by `02-tracing-runs.R`,
+each time in a fresh R session against that version’s greta, installed
+on its own: CRAN (greta 0.6.0), main, and greta#843. This is run 3 of 3.
+The report, `report.html`, puts every run of the three versions side by
+side.
 
 ## Which greta this is
 
-```{r}
-#| label: build
+``` r
 library(greta)
+```
 
+
+    Attaching package: 'greta'
+
+    The following objects are masked from 'package:stats':
+
+        binomial, cov2cor, poisson
+
+    The following objects are masked from 'package:base':
+
+        %*%, %o%, apply, backsolve, beta, chol2inv, colMeans, colSums,
+        diag, eigen, forwardsolve, gamma, identity, outer, rowMeans,
+        rowSums, sweep, tapply
+
+``` r
 params$label
-params$branch
-params$sha
-find.package("greta")
+```
 
+    [1] "#843"
+
+``` r
+params$branch
+```
+
+    [1] "faster-hessians-i546"
+
+``` r
+params$sha
+```
+
+    [1] "94ef91b919300d33474aa3273cbb1f49cb989373"
+
+``` r
+find.package("greta")
+```
+
+    [1] "/Users/nick_1/github/greta-dev/greta.benchmarks/2026-10-01-retracing-i546/libs/faster-hessians-i546/greta"
+
+``` r
+# the settings every mcmc() call below uses: the draws asked for are the
+# iterations divided by this version's iterations per draw
+params$iterations_per_draw
+```
+
+    [1] 2
+
+``` r
+warmup_draws <- as.integer(params$warmup_iterations / params$iterations_per_draw)
+sample_draws <- as.integer(params$sample_iterations / params$iterations_per_draw)
+c(
+  warmup_draws = warmup_draws,
+  sample_draws = sample_draws,
+  chains = params$chains,
+  cores = params$cores
+)
+```
+
+    warmup_draws sample_draws       chains        cores 
+            1000         1000            4            4 
+
+``` r
 # greta#843 adds pfor_min_elements(), so this is TRUE only on #843
 exists("pfor_min_elements", envir = asNamespace("greta"))
 ```
 
+    [1] TRUE
+
 ## How the retracing is shown
 
-TensorFlow warns when a `tf.function` is traced many times, but it logs the
-warning through Python, where knitr cannot see it. `retracing()` routes
-TensorFlow's logger to stderr, captures that, and returns the warning lines.
-`traces()` asks a traced function how many times it has been traced.
+TensorFlow warns when a `tf.function` is traced many times, but it logs
+the warning through Python, where knitr cannot see it. `retracing()`
+routes TensorFlow’s logger to stderr, captures that, and returns the
+warning lines. `traces()` asks a traced function how many times it has
+been traced.
 
-```{r}
-#| label: helpers
+``` r
 rebind_tf_logger <- function() {
   reticulate::py_run_string(paste(
     "import sys",
@@ -75,9 +123,10 @@ one_run <- function(m) {
     time <- system.time(
       draws <- mcmc(
         m,
-        warmup = 1000,
-        n_samples = 1000,
-        chains = 4,
+        warmup = warmup_draws,
+        n_samples = sample_draws,
+        chains = params$chains,
+        n_cores = params$cores,
         verbose = FALSE
       )
     )
@@ -95,20 +144,27 @@ one_run <- function(m) {
 runs <- list()
 ```
 
-Each model is from greta's `inst/examples/`, and is the same model the
+Each model is from greta’s `inst/examples/`, and is the same model the
 benchmark suite runs.
 
 ## linear
 
-A simple linear regression: the rating in `attitude` against the number of
-complaints. Three parameters, so it is the floor for greta's per-iteration
-overhead. The intercept and slope come out correlated at -0.97, because the
-predictor is not centred, so they mix more slowly than `sd`.
+A simple linear regression: the rating in `attitude` against the number
+of complaints. Three parameters, so it is the floor for greta’s
+per-iteration overhead. The intercept and slope come out correlated at
+-0.97, because the predictor is not centred, so they mix more slowly
+than `sd`.
 
-```{r}
-#| label: linear
+``` r
 set.seed(2026 - 09 - 29)
 int <- normal(0, 10)
+```
+
+    ℹ Initialising Python
+
+    ✔ Python, TensorFlow and TFP are ready
+
+``` r
 coef <- normal(0, 10)
 sd <- cauchy(0, 3, truncation = c(0, Inf))
 mu <- int + coef * attitude$complaints
@@ -119,13 +175,15 @@ runs$linear <- one_run(m)
 runs$linear
 ```
 
+      seconds retracing_warnings log_prob_traces trace_values_traces sampler_traces
+    1    3.51                  0               1                   1              1
+
 ## multiple_linear
 
-The same regression on all six predictors in `attitude`, through a matrix
-multiply, so the gradient goes through `%*%`. Eight parameters.
+The same regression on all six predictors in `attitude`, through a
+matrix multiply, so the gradient goes through `%*%`. Eight parameters.
 
-```{r}
-#| label: multiple-linear
+``` r
 set.seed(2026 - 09 - 29)
 design <- as.matrix(attitude[, 2:7])
 int <- normal(0, 10)
@@ -139,14 +197,16 @@ runs$multiple_linear <- one_run(m)
 runs$multiple_linear
 ```
 
+      seconds retracing_warnings log_prob_traces trace_values_traces sampler_traces
+    1    3.43                  0               1                   1              1
+
 ## hierarchical_linear
 
-Sepal length against sepal width in `iris`, with an offset per species drawn
-from a shared distribution. It uses `rbind()` and integer indexing, which cost
-more per iteration than its six parameters suggest.
+Sepal length against sepal width in `iris`, with an offset per species
+drawn from a shared distribution. It uses `rbind()` and integer
+indexing, which cost more per iteration than its six parameters suggest.
 
-```{r}
-#| label: hierarchical-linear
+``` r
 set.seed(2026 - 09 - 29)
 int <- normal(0, 10)
 coef <- normal(0, 10)
@@ -163,14 +223,17 @@ runs$hierarchical_linear <- one_run(m)
 runs$hierarchical_linear
 ```
 
+      seconds retracing_warnings log_prob_traces trace_values_traces sampler_traces
+    1    5.35                  0               1                   1              1
+
 ## eight_schools
 
 The classic hierarchical model of coaching effects in eight schools. The
-school effects' scale is itself a parameter, which makes the posterior a
-funnel: the standard test of whether a sampler handles hierarchical models.
+school effects’ scale is itself a parameter, which makes the posterior a
+funnel: the standard test of whether a sampler handles hierarchical
+models.
 
-```{r}
-#| label: eight-schools
+``` r
 set.seed(2026 - 09 - 29)
 y <- c(28, 8, -3, 7, -1, 1, 18, 12)
 sigma_y <- c(15, 10, 16, 11, 9, 11, 10, 18)
@@ -187,16 +250,18 @@ runs$eight_schools <- one_run(m)
 runs$eight_schools
 ```
 
+      seconds retracing_warnings log_prob_traces trace_values_traces sampler_traces
+    1    3.73                  0               1                   1              1
+
 ## cjs
 
 A Cormack-Jolly-Seber capture-recapture model: survival and detection
 probabilities for 20 occasions, from simulated capture histories of 100
-animals. The recursion for `chi` adds nodes on each of 19 iterations, so this
-is the deep graph, where graph construction costs more than the 40 parameters
-suggest.
+animals. The recursion for `chi` adds nodes on each of 19 iterations, so
+this is the deep graph, where graph construction costs more than the 40
+parameters suggest.
 
-```{r}
-#| label: cjs
+``` r
 set.seed(2026)
 n_obs <- 100
 n_time <- 20
@@ -241,13 +306,15 @@ runs$cjs <- one_run(m)
 runs$cjs
 ```
 
+      seconds retracing_warnings log_prob_traces trace_values_traces sampler_traces
+    1   34.37                  0               1                   1              1
+
 ## opt() with a hessian for each of 20 scalar targets
 
-The case greta#546 reported: a model with many separate targets, each needing
-its own hessian.
+The case greta#546 reported: a model with many separate targets, each
+needing its own hessian.
 
-```{r}
-#| label: hessians
+``` r
 set.seed(2026 - 09 - 29)
 y <- rnorm(20)
 
@@ -270,22 +337,43 @@ hessian_run <- data.frame(
   retracing_warnings = length(hessian_warnings)
 )
 hessian_run
+```
+
+      seconds retracing_warnings
+    1    1.87                  0
+
+``` r
 cat(substr(hessian_warnings, 1, 120), sep = "\n")
 ```
 
 ## All five mcmc() runs
 
-```{r}
-#| label: summary
+``` r
 summary <- do.call(rbind, runs)
 summary
+```
 
+                        seconds retracing_warnings log_prob_traces
+    linear                 3.51                  0               1
+    multiple_linear        3.43                  0               1
+    hierarchical_linear    5.35                  0               1
+    eight_schools          3.73                  0               1
+    cjs                   34.37                  0               1
+                        trace_values_traces sampler_traces
+    linear                                1              1
+    multiple_linear                       1              1
+    hierarchical_linear                   1              1
+    eight_schools                         1              1
+    cjs                                   1              1
+
+``` r
 if (nzchar(params$out_rds)) {
   saveRDS(
     list(
       label = params$label,
       branch = params$branch,
       sha = params$sha,
+      run = params$run,
       mcmc = cbind(model = rownames(summary), summary),
       hessian = hessian_run
     ),

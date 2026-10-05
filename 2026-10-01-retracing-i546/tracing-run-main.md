@@ -1,10 +1,11 @@
-# One run of each model, on main
+# Tracing run of each model, on main
 
 
-This document is rendered once per version by `01-single-runs.R`, each
-time against that version’s greta, installed on its own: CRAN (greta
-0.6.0), main, and greta#843. The numbers are one run each. The report,
-`report.html`, puts the three side by side.
+This document is rendered 3 times per version by `02-tracing-runs.R`,
+each time in a fresh R session against that version’s greta, installed
+on its own: CRAN (greta 0.6.0), main, and greta#843. This is run 3 of 3.
+The report, `report.html`, puts every run of the three versions side by
+side.
 
 ## Which greta this is
 
@@ -48,6 +49,28 @@ find.package("greta")
 ```
 
     [1] "/Users/nick_1/github/greta-dev/greta.benchmarks/2026-10-01-retracing-i546/libs/main/greta"
+
+``` r
+# the settings every mcmc() call below uses: the draws asked for are the
+# iterations divided by this version's iterations per draw
+params$iterations_per_draw
+```
+
+    [1] 2
+
+``` r
+warmup_draws <- as.integer(params$warmup_iterations / params$iterations_per_draw)
+sample_draws <- as.integer(params$sample_iterations / params$iterations_per_draw)
+c(
+  warmup_draws = warmup_draws,
+  sample_draws = sample_draws,
+  chains = params$chains,
+  cores = params$cores
+)
+```
+
+    warmup_draws sample_draws       chains        cores 
+            1000         1000            4            4 
 
 ``` r
 # greta#843 adds pfor_min_elements(), so this is TRUE only on #843
@@ -100,9 +123,10 @@ one_run <- function(m) {
     time <- system.time(
       draws <- mcmc(
         m,
-        warmup = 1000,
-        n_samples = 1000,
-        chains = 4,
+        warmup = warmup_draws,
+        n_samples = sample_draws,
+        chains = params$chains,
+        n_cores = params$cores,
         verbose = FALSE
       )
     )
@@ -152,7 +176,7 @@ runs$linear
 ```
 
       seconds retracing_warnings log_prob_traces trace_values_traces sampler_traces
-    1    3.51                  0               2                   2              1
+    1    3.39                  0               2                   2              1
 
 ## multiple_linear
 
@@ -174,7 +198,7 @@ runs$multiple_linear
 ```
 
       seconds retracing_warnings log_prob_traces trace_values_traces sampler_traces
-    1    3.38                  0               2                   2              1
+    1    3.35                  0               2                   2              1
 
 ## hierarchical_linear
 
@@ -200,7 +224,7 @@ runs$hierarchical_linear
 ```
 
       seconds retracing_warnings log_prob_traces trace_values_traces sampler_traces
-    1    5.56                  0               2                   2              1
+    1    5.35                  0               2                   2              1
 
 ## eight_schools
 
@@ -227,7 +251,7 @@ runs$eight_schools
 ```
 
       seconds retracing_warnings log_prob_traces trace_values_traces sampler_traces
-    1    3.82                  0               2                   2              1
+    1     3.7                  0               2                   2              1
 
 ## cjs
 
@@ -283,7 +307,7 @@ runs$cjs
 ```
 
       seconds retracing_warnings log_prob_traces trace_values_traces sampler_traces
-    1   36.55                  0               2                   2              1
+    1   37.48                  0               2                   2              1
 
 ## opt() with a hessian for each of 20 scalar targets
 
@@ -316,14 +340,14 @@ hessian_run
 ```
 
       seconds retracing_warnings
-    1   12.09                  2
+    1   12.04                  2
 
 ``` r
 cat(substr(hessian_warnings, 1, 120), sep = "\n")
 ```
 
-    WARNING:tensorflow:5 out of the last 5 calls to <function pfor.<locals>.f at 0x11af4e3e0> triggered tf.function retracin
-    WARNING:tensorflow:6 out of the last 6 calls to <function pfor.<locals>.f at 0x11ae227a0> triggered tf.function retracin
+    WARNING:tensorflow:5 out of the last 5 calls to <function pfor.<locals>.f at 0x11d032de0> triggered tf.function retracin
+    WARNING:tensorflow:6 out of the last 6 calls to <function pfor.<locals>.f at 0x11ccba200> triggered tf.function retracin
 
 ## All five mcmc() runs
 
@@ -333,11 +357,11 @@ summary
 ```
 
                         seconds retracing_warnings log_prob_traces
-    linear                 3.51                  0               2
-    multiple_linear        3.38                  0               2
-    hierarchical_linear    5.56                  0               2
-    eight_schools          3.82                  0               2
-    cjs                   36.55                  0               2
+    linear                 3.39                  0               2
+    multiple_linear        3.35                  0               2
+    hierarchical_linear    5.35                  0               2
+    eight_schools          3.70                  0               2
+    cjs                   37.48                  0               2
                         trace_values_traces sampler_traces
     linear                                2              1
     multiple_linear                       2              1
@@ -352,6 +376,7 @@ if (nzchar(params$out_rds)) {
       label = params$label,
       branch = params$branch,
       sha = params$sha,
+      run = params$run,
       mcmc = cbind(model = rownames(summary), summary),
       hessian = hessian_run
     ),

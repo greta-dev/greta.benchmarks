@@ -94,10 +94,11 @@ add_ratios <- function(wide, comparisons) {
 }
 
 #' Median milliseconds per example x task, one column per branch, and the
-#' ratios.
-speed_table <- function(timings_relative, comparisons) {
-  timings_relative |>
-    select(example, task, branch, ms) |>
+#' ratios. `every_run` is timed_runs(): one row per timed run.
+speed_table <- function(every_run, comparisons) {
+  every_run |>
+    group_by(example, task, branch) |>
+    summarise(ms = 1000 * median(seconds), .groups = "drop") |>
     pivot_wider(names_from = branch, values_from = ms) |>
     add_ratios(comparisons)
 }
@@ -120,7 +121,8 @@ sampling_table <- function(sampling, comparisons) {
     add_ratios(comparisons)
 }
 
-#' One row per comparison and example: does anything disagree?
+#' One row per comparison and example: the largest |z|, and how many variables
+#' are beyond `threshold`.
 #'
 #' `threshold` is not 2. There is one z per variable and the largest of many
 #' standard normals exceeds 2 routinely - `cjs` alone has 40 of them.
@@ -133,28 +135,5 @@ posterior_agreement <- function(comparison, threshold = 4) {
       n_disagree = sum(abs(z_mean) > threshold),
       worst_variable = variable[which.max(abs(z_mean))],
       .groups = "drop"
-    ) |>
-    mutate(
-      verdict = if_else(
-        n_disagree > 0,
-        "posteriors differ",
-        "agree within Monte Carlo error"
-      )
     )
-}
-
-#' Relative median time per example x task, with the reference branch at 1.
-relative_timings <- function(timings) {
-  split(timings, list(timings$example, timings$task), drop = TRUE) |>
-    lapply(function(cell) {
-      s <- summary(cell)
-      data.frame(
-        example = cell$example[[1]],
-        task = cell$task[[1]],
-        branch = s$branch,
-        ms = as.numeric(s$median) * 1000,
-        relative = as.numeric(s$median) / min(as.numeric(s$median))
-      )
-    }) |>
-    bind_rows()
 }

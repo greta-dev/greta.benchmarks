@@ -1,0 +1,12 @@
+---
+title: "greta benchmarks"
+listing:
+  contents: posts
+  sort: "date desc"
+  type: table
+  fields: [date, title, description]
+  sort-ui: false
+  filter-ui: false
+---
+
+Each post compares versions of [greta](https://github.com/greta-dev/greta). A post's `run.R` holds all of the code that was measured: the models, the calls that were timed, and the settings. It installs each version with [{cross}](https://github.com/DavisVaughan/cross) and times it with [{bench}](https://bench.r-lib.org/), in a fresh R session per version, and the page shows that script in full, beside every result it produced.
