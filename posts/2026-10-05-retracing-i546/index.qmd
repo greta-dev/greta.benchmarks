@@ -2,6 +2,7 @@
 title: "Retracing on CRAN, main and greta#843"
 description: "Building models, opt(), opt(hessian = TRUE) and mcmc() on greta 0.6.0, main and greta#843: how long each takes, how many times each traces its TensorFlow functions, and the posteriors mcmc() returns."
 date: 2026-10-05
+bibliography: ../../references.bib
 resources:
   - run.R
 ---
@@ -14,6 +15,9 @@ resources:
 library(dplyr)
 library(tidyr)
 library(ggplot2)
+
+# white panels, so the grey band in Agreement shows
+theme_set(theme_bw())
 
 sessions <- list.files(
   "results",
@@ -53,13 +57,30 @@ collect <- function(part) {
     mutate(version = factor(version, levels = version_levels))
 }
 
+# The first call on a model traces its TensorFlow functions; later calls on the
+# same model reuse them.
+label_calls <- function(call) {
+  last <- max(call)
+  later <- if (last == 2) {
+    "second call on the same model"
+  } else if (last == 3) {
+    "calls 2 and 3 on the same model"
+  } else {
+    paste0("calls 2 to ", last, " on the same model")
+  }
+  factor(
+    ifelse(call == 1, "first call on a new model", later),
+    levels = c("first call on a new model", later)
+  )
+}
+
 provenance <- collect("provenance")
-iterations_per_draw <- collect("iterations_per_draw")
+sampler_iterations_per_draw <- collect("sampler_iterations_per_draw")
 build <- collect("build")
-opt_calls <- collect("opt")
-hessian <- collect("hessian")
-mcmc_runs <- collect("mcmc")
-posterior <- collect("posterior")
+opt_timings <- collect("opt") |> mutate(calls = label_calls(call))
+hessian <- collect("hessian") |> mutate(calls = label_calls(call))
+mcmc_calls <- collect("mcmc") |> mutate(calls = label_calls(call))
+posterior <- collect("posterior") |> mutate(calls = label_calls(call))
 draws <- collect("draws")
 
 model_levels <- unique(build$model)
@@ -67,12 +88,10 @@ tidy_models <- function(data) {
   mutate(data, model = factor(model, levels = model_levels))
 }
 build <- tidy_models(build)
-opt_calls <- tidy_models(opt_calls)
-mcmc_runs <- tidy_models(mcmc_runs)
+opt_timings <- tidy_models(opt_timings)
+mcmc_calls <- tidy_models(mcmc_calls)
 posterior <- tidy_models(posterior)
 draws <- tidy_models(draws)
-
-run_labels <- c(`1` = "first run", `2` = "second run")
 
 # three significant figures each, where format() would pad a vector to the
 # decimal places of its smallest value
@@ -80,58 +99,36 @@ format_number <- function(x) {
   formatC(signif(x, 3), format = "fg", digits = 3, big.mark = ",")
 }
 
-medians_text <- function(data) {
-  medians <- data |>
-    group_by(version) |>
-    summarise(median = median(seconds))
-  paste(
-    sprintf("%s %s", medians$version, format_number(medians$median)),
-    collapse = ", "
-  )
+# "CRAN 10.6, main 11.2, #843 0.643"
+versions_text <- function(version, value) {
+  paste(paste(version, format_number(value)), collapse = ", ")
 }
 
-seconds_table <- function(data, ...) {
-  data |>
-    group_by(..., version) |>
-    summarise(
-      calls = n(),
-      min = min(seconds),
-      median = median(seconds),
-      max = max(seconds),
-      .groups = "drop"
-    ) |>
-    knitr::kable(digits = 3)
-}
-
-call_caption <- "Each small dot is one call, from every session; the large dot is their mean."
-run_caption <- "Each small dot is one run, from every session; the large dot is their mean."
-
-# every value as a small dot and their mean as a large one, for each version
-# at each `x`
-gg_dots <- function(data, x, y, x_label = NULL, y_label = "Seconds", by_model = TRUE) {
-  plot <- ggplot(data, aes(x = {{ x }}, y = {{ y }}, colour = version)) +
-    geom_point(
-      position = position_jitterdodge(
-        jitter.width = 0.15,
-        jitter.height = 0,
-        dodge.width = 0.6,
-        seed = 2026
-      ),
-      size = 1.2,
-      alpha = 0.6
-    ) +
-    stat_summary(
-      fun = mean,
-      geom = "point",
-      size = 3.5,
-      position = position_dodge(width = 0.6)
-    ) +
-    scale_colour_manual(values = version_colours) +
-    labs(x = x_label, y = y_label, colour = NULL)
-  if (by_model) {
-    plot <- plot + facet_wrap(~model, scales = "free_y")
+# "CRAN, main and #843"
+paste_and <- function(x) {
+  if (length(x) <= 1) {
+    return(x)
   }
-  plot
+  paste(paste(x[-length(x)], collapse = ", "), "and", x[length(x)])
+}
+
+version_scale <- scale_colour_manual(values = version_colours, guide = "none")
+jitter <- position_jitter(width = 0, height = 0.2, seed = 2026)
+call_caption <- "Each small dot is one call, from every session. The large faint dot behind them is their mean."
+
+# a searchable table, its numbers rounded for reading
+dt_table <- function(data, digits = 3) {
+  table <- DT::datatable(
+    data,
+    rownames = FALSE,
+    filter = "top",
+    options = list(pageLength = 10, autoWidth = TRUE)
+  )
+  decimal_columns <- names(data)[vapply(data, is.double, logical(1))]
+  if (length(decimal_columns) == 0) {
+    return(table)
+  }
+  DT::formatRound(table, decimal_columns, digits)
 }
 
 # code shown on this page is read out of run.R, so it is the code that ran
@@ -228,7 +225,10 @@ provenance |>
 python_stacks <- provenance |>
   distinct(version, tensorflow_version, tfp_version) |>
   group_by(tensorflow_version, tfp_version) |>
-  summarise(versions = paste(version, collapse = " and "), .groups = "drop")
+  summarise(
+    versions = paste_and(as.character(sort(version))),
+    .groups = "drop"
+  )
 python_stack_text <- paste0(
   python_stacks$versions,
   " ran on TensorFlow ",
@@ -241,18 +241,27 @@ python_stack_text <- paste0(
 
 `{r} python_stack_text`.
 
-Each version ran in `{r} n_sessions` sessions, each a fresh R session per version, on `{r} unique(provenance$machine)` with `{r} unique(provenance$cores)` cores. Each session measured the versions in a new random order:
+Each version ran in `{r} n_sessions` sessions, each a fresh R session per version, on `{r} unique(provenance$machine)` with `{r} unique(provenance$cores)` cores, with the versions in a new random order each session. Within a session, each version's process ran every measurement below in the order of [The code](#the-code), the models in the order listed.
+
+<details><summary>Table: the order of each session</summary>
 
 ```{r}
-#| label: order
+#| label: table-order
 sessions |>
-  lapply(\(session) data.frame(session = session$session, t(session$order))) |>
+  lapply(\(session) {
+    data.frame(
+      session = session$session,
+      position = seq_along(session$order),
+      version = session$order
+    )
+  }) |>
   bind_rows() |>
-  setNames(c("session", "first", "second", "third")[seq_len(length(versions) + 1)]) |>
-  knitr::kable()
+  dt_table()
 ```
 
-Within a session, each version's process ran every measurement below in the order of [The code](#the-code), the models in the order listed. Every `mcmc()` call, on every version, was this call from `run.R`:
+</details>
+
+Every `mcmc()` call, on every version, was this call from `run.R`, with `warmup = {r} settings$warmup` and `n_samples = {r} settings$n_samples` draws, `chains = {r} settings$chains` and `n_cores = {r} settings$n_cores`:
 
 ```{r}
 #| label: mcmc-call
@@ -261,13 +270,15 @@ Within a session, each version's process ran every measurement below in the orde
 #| code-fold: false
 ```
 
-with these settings:
+<details><summary>Table: every setting in `run.R`</summary>
 
 ```{r}
-#| label: settings
+#| label: table-settings
 tibble::enframe(unlist(settings), name = "setting", value = "value") |>
-  knitr::kable()
+  dt_table()
 ```
+
+</details>
 
 ## The models
 
@@ -410,105 +421,228 @@ $$
 
 :::
 
-## Iterations per draw
+## Sampler iterations per kept draw
 
-The same `mcmc()` arguments are the same work only if each version runs the same number of sampler iterations per kept draw. `run.R` measures it in every session, from a random walk that accepts every step: the variance between kept draws, over one step's variance, counts the iterations between them.
+The same `mcmc()` arguments are the same work only if each version's sampler runs the same number of iterations for each draw it keeps. `run.R` measures this in every session, from a random walk that accepts every step: the variance between kept draws, over one step's variance, counts the sampler iterations between them.
 
 ```{r}
-#| label: iterations-per-draw
-iterations_per_draw |>
+#| label: sampler-iterations
+sampler_iterations_values <- sampler_iterations_per_draw |>
   group_by(version) |>
-  summarise(
-    sessions = n(),
-    iterations_per_draw = paste(sort(unique(value)), collapse = ", ")
-  ) |>
-  knitr::kable()
+  summarise(values = paste(sort(unique(value)), collapse = " or "))
 ```
+
+Sampler iterations per kept draw, in every session: `{r} paste(sampler_iterations_values$version, sampler_iterations_values$values, collapse = ", ")`.
+
+<details><summary>Table: every session</summary>
+
+```{r}
+#| label: table-sampler-iterations
+sampler_iterations_per_draw |>
+  select(session, version, sampler_iterations_per_draw = value) |>
+  dt_table()
+```
+
+</details>
 
 ## Speed
 
-Every call below is timed with {bench}. The first `opt()`, `opt(hessian = TRUE)` or `mcmc()` call on a model is the one that traces its TensorFlow functions, so every call is shown rather than a summary.
+Every call below is timed with {bench}. The first `opt()`, `opt(hessian = TRUE)` or `mcmc()` call on a new model traces the model's TensorFlow functions; later calls on the same model reuse them. So the plots split the first call from the later ones.
 
 ::: panel-tabset
 
 ### Building the model
 
-Calling the model's function in [The models](#the-models): creating its greta arrays and calling `model()`, `{r} settings$build_iterations` times per session. Median seconds per call, over all models: `{r} medians_text(build)`.
+Calling the model's function in [The models](#the-models): creating its greta arrays and calling `model()`, `{r} settings$build_calls` times per session.
+
+```{r}
+#| label: build-summaries
+build_means <- build |>
+  group_by(model, version) |>
+  summarise(seconds = mean(seconds), .groups = "drop")
+
+build_medians <- build |>
+  group_by(version) |>
+  summarise(seconds = median(seconds))
+```
+
+Median seconds per call, over all models and sessions: `{r} versions_text(build_medians$version, build_medians$seconds)`.
 
 ```{r}
 #| label: plot-build
 #| fig-cap: !expr call_caption
-gg_dots(build, version, seconds)
+#| fig-height: 7
+ggplot(build, aes(x = seconds, y = version, colour = version)) +
+  geom_point(data = build_means, size = 5, alpha = 0.25) +
+  geom_point(position = jitter, size = 1.2) +
+  version_scale +
+  facet_wrap(~model, ncol = 1, scales = "free_x") +
+  labs(x = "Seconds", y = NULL)
 ```
 
-<details><summary>Table</summary>
+<details><summary>Table: mean seconds</summary>
+
+```{r}
+#| label: table-build-means
+dt_table(build_means)
+```
+
+</details>
+
+<details><summary>Table: every call</summary>
 
 ```{r}
 #| label: table-build
-seconds_table(build, model)
+build |>
+  select(session, version, model, call, seconds) |>
+  dt_table()
 ```
 
 </details>
 
 ### opt()
 
-`opt(m)`, `{r} settings$opt_iterations` times per session on a model built for it. Median seconds per call, over all models: `{r} medians_text(opt_calls)`.
+`opt(m)`, `{r} settings$opt_calls` times per session on a model built for it.
+
+```{r}
+#| label: opt-summaries
+opt_means <- opt_timings |>
+  group_by(model, calls, version) |>
+  summarise(seconds = mean(seconds), .groups = "drop")
+
+opt_medians <- opt_timings |>
+  group_by(version) |>
+  summarise(seconds = median(seconds))
+```
+
+Median seconds per call, over all models, calls and sessions: `{r} versions_text(opt_medians$version, opt_medians$seconds)`.
 
 ```{r}
 #| label: plot-opt
 #| fig-cap: !expr call_caption
-gg_dots(opt_calls, factor(call), seconds, x_label = "Call on the model")
+#| fig-height: 9
+ggplot(opt_timings, aes(x = seconds, y = version, colour = version)) +
+  geom_point(data = opt_means, size = 5, alpha = 0.25) +
+  geom_point(position = jitter, size = 1.2) +
+  version_scale +
+  facet_wrap(vars(model, calls), ncol = 2, scales = "free_x") +
+  labs(x = "Seconds", y = NULL)
 ```
 
-<details><summary>Table</summary>
+<details><summary>Table: mean seconds</summary>
+
+```{r}
+#| label: table-opt-means
+dt_table(opt_means)
+```
+
+</details>
+
+<details><summary>Table: every call</summary>
 
 ```{r}
 #| label: table-opt
-seconds_table(opt_calls, model, call)
+opt_timings |>
+  select(session, version, model, call, seconds) |>
+  dt_table()
 ```
 
 </details>
 
 ### opt(hessian = TRUE)
 
-`opt(m, hessian = TRUE)` on the hessian model, `{r} settings$hessian_iterations` times per session on the same model. Median seconds per call: `{r} medians_text(hessian)`.
+`opt(m, hessian = TRUE)` on the hessian model, `{r} settings$hessian_calls` times per session on the same model.
+
+```{r}
+#| label: hessian-summaries
+hessian_means <- hessian |>
+  group_by(calls, version) |>
+  summarise(seconds = mean(seconds), .groups = "drop")
+
+hessian_medians <- hessian |>
+  group_by(version) |>
+  summarise(seconds = median(seconds))
+```
+
+Median seconds per call, over all calls and sessions: `{r} versions_text(hessian_medians$version, hessian_medians$seconds)`.
 
 ```{r}
 #| label: plot-hessian
 #| fig-cap: !expr call_caption
-gg_dots(
-  hessian,
-  factor(call),
-  seconds,
-  x_label = "Call on the model",
-  by_model = FALSE
-)
+#| fig-height: 4
+ggplot(hessian, aes(x = seconds, y = version, colour = version)) +
+  geom_point(data = hessian_means, size = 5, alpha = 0.25) +
+  geom_point(position = jitter, size = 1.2) +
+  version_scale +
+  facet_wrap(~calls, ncol = 1) +
+  labs(x = "Seconds", y = NULL)
 ```
 
-<details><summary>Table</summary>
+<details><summary>Table: mean seconds</summary>
+
+```{r}
+#| label: table-hessian-means
+dt_table(hessian_means)
+```
+
+</details>
+
+<details><summary>Table: every call</summary>
 
 ```{r}
 #| label: table-hessian
-seconds_table(hessian, call)
+hessian |>
+  select(session, version, call, seconds) |>
+  dt_table()
 ```
 
 </details>
 
 ### mcmc()
 
-Two `mcmc()` runs per session on each model: the first traces the model's functions, the second reuses them. Median seconds per run, over all models: `{r} medians_text(mcmc_runs)`.
+Two `mcmc()` calls per session on each model: the first on a new model, and the second on the same model, which reuses the functions the first call traced.
+
+```{r}
+#| label: mcmc-summaries
+mcmc_means <- mcmc_calls |>
+  group_by(model, calls, version) |>
+  summarise(seconds = mean(seconds), .groups = "drop")
+
+mcmc_medians <- mcmc_calls |>
+  group_by(version) |>
+  summarise(seconds = median(seconds))
+```
+
+Median seconds per call, over all models, calls and sessions: `{r} versions_text(mcmc_medians$version, mcmc_medians$seconds)`.
 
 ```{r}
 #| label: plot-mcmc
-#| fig-cap: !expr run_caption
-gg_dots(mcmc_runs, factor(run, labels = run_labels), seconds)
+#| fig-cap: !expr call_caption
+#| fig-height: 9
+ggplot(mcmc_calls, aes(x = seconds, y = version, colour = version)) +
+  geom_point(data = mcmc_means, size = 5, alpha = 0.25) +
+  geom_point(position = jitter, size = 1.2) +
+  version_scale +
+  facet_wrap(vars(model, calls), ncol = 2, scales = "free_x") +
+  labs(x = "Seconds", y = NULL)
 ```
 
-<details><summary>Table</summary>
+<details><summary>Table: mean seconds</summary>
+
+```{r}
+#| label: table-mcmc-means
+dt_table(mcmc_means)
+```
+
+</details>
+
+<details><summary>Table: every call</summary>
 
 ```{r}
 #| label: table-mcmc
-seconds_table(mcmc_runs, model, run)
+mcmc_calls |>
+  select(session, version, model, call, seconds) |>
+  dt_table()
 ```
 
 </details>
@@ -517,14 +651,12 @@ seconds_table(mcmc_runs, model, run)
 
 ## Tracing
 
-After each `mcmc()` run, `run.R` asks each of the model's TensorFlow functions how many times it has been traced, so the count after the second run includes the first. It also counts the retracing warnings TensorFlow logged during the run.
+After each `mcmc()` call, `run.R` asks each of the model's TensorFlow functions how many times it has been traced, so the count after the second call includes the first. It also counts the retracing warnings TensorFlow logged during the call.
 
 ```{r}
-#| label: plot-tracing
-#| fig-height: 7
-#| warning: false
-tracing <- mcmc_runs |>
-  select(session, version, model, run, retracing_warnings, ends_with("_traces")) |>
+#| label: tracing-counts
+tracing <- mcmc_calls |>
+  select(session, version, model, calls, retracing_warnings, ends_with("_traces")) |>
   pivot_longer(
     c(retracing_warnings, ends_with("_traces")),
     names_to = "measure",
@@ -535,29 +667,33 @@ tracing <- mcmc_runs |>
       measure,
       levels = c("log_prob_traces", "trace_values_traces", "sampler_traces", "retracing_warnings"),
       labels = c("log density traces", "trace values traces", "sampler traces", "retracing warnings")
-    ),
-    run = factor(run, labels = run_labels)
+    )
   )
 
-same_in_every_session <- tracing |>
-  group_by(version, model, run, measure) |>
-  summarise(values = n_distinct(count), .groups = "drop") |>
-  pull(values) |>
-  max() ==
-  1
+# whether every session gave the same count, so one bar can stand for them all
+counts_per_session <- tracing |>
+  group_by(version, model, calls, measure) |>
+  summarise(distinct_counts = n_distinct(count), .groups = "drop")
+same_in_every_session <- all(counts_per_session$distinct_counts == 1)
+```
 
-tracing_plot <- ggplot(tracing, aes(x = model, y = count, fill = version, colour = version)) +
+`{r} if (same_in_every_session) paste0("Each count was the same in all ", n_sessions, " sessions, so each bar is that count.") else "The counts differ between sessions, so each dot is one session."`
+
+```{r}
+#| label: plot-tracing
+#| fig-height: 8
+#| warning: false
+tracing_plot <- ggplot(tracing, aes(x = count, y = model, fill = version, colour = version)) +
   scale_fill_manual(values = version_colours) +
   scale_colour_manual(values = version_colours) +
-  scale_y_continuous(breaks = \(limits) unique(floor(pretty(limits)))) +
-  facet_grid(measure ~ run, scales = "free_y") +
-  labs(x = NULL, y = "Count", fill = NULL, colour = NULL) +
-  theme(axis.text.x = element_text(angle = 30, hjust = 1))
+  scale_x_continuous(breaks = \(limits) unique(floor(pretty(limits)))) +
+  facet_grid(measure ~ calls, scales = "free_x") +
+  labs(x = "Count", y = NULL, fill = NULL, colour = NULL)
 
 if (same_in_every_session) {
   tracing_plot +
     geom_col(
-      data = distinct(tracing, version, model, run, measure, count),
+      data = distinct(tracing, version, model, calls, measure, count),
       position = position_dodge(width = 0.8),
       width = 0.75,
       colour = NA
@@ -568,56 +704,55 @@ if (same_in_every_session) {
 }
 ```
 
-`{r} if (same_in_every_session) paste0("Each count was the same in all ", n_sessions, " sessions, so each bar is that count.") else "The counts differ between sessions, so each dot is one session."`
-
-<details><summary>Table</summary>
+<details><summary>Table: every count</summary>
 
 ```{r}
 #| label: table-tracing
 tracing |>
-  group_by(measure, run, model, version) |>
-  summarise(counts = paste(sort(unique(count)), collapse = ", "), .groups = "drop") |>
-  pivot_wider(names_from = version, values_from = counts) |>
-  knitr::kable()
+  select(session, version, model, calls, measure, count) |>
+  dt_table()
 ```
 
 </details>
 
-TensorFlow logged this many retracing warnings during each session's `{r} settings$hessian_iterations` calls of `opt(m, hessian = TRUE)`:
-
 ```{r}
-#| label: table-hessian-warnings
-hessian |>
+#| label: hessian-warnings
+hessian_warning_counts <- hessian |>
   distinct(session, version, retracing_warnings_in_all_calls) |>
   group_by(version) |>
-  summarise(
-    sessions = n(),
-    retracing_warnings = paste(sort(unique(retracing_warnings_in_all_calls)), collapse = ", ")
-  ) |>
-  knitr::kable()
+  summarise(counts = paste(sort(unique(retracing_warnings_in_all_calls)), collapse = " or "))
 ```
+
+Retracing warnings TensorFlow logged during each session's `{r} settings$hessian_calls` calls of `opt(m, hessian = TRUE)`: `{r} paste(hessian_warning_counts$version, hessian_warning_counts$counts, collapse = ", ")`.
 
 ## Efficiency
 
-Bulk effective sample size (ESS) per second of `mcmc()`, for each run's parameter with the smallest bulk ESS, and for its median parameter. The seconds are the whole `mcmc()` call, so a first run's include its tracing.
+Bulk effective sample size (ESS) per second of `mcmc()`, for the parameter with the smallest bulk ESS in each call, and for the median parameter. The seconds are the whole `mcmc()` call, so a first call's include its tracing.
 
 ```{r}
 #| label: efficiency
 efficiency <- posterior |>
-  group_by(session, version, model, run) |>
+  group_by(session, version, model, calls) |>
   summarise(
-    min_ess_bulk = min(ess_bulk),
+    smallest_ess_bulk = min(ess_bulk),
     median_ess_bulk = median(ess_bulk),
     .groups = "drop"
   ) |>
   left_join(
-    select(mcmc_runs, session, version, model, run, seconds),
-    by = c("session", "version", "model", "run")
+    select(mcmc_calls, session, version, model, calls, seconds),
+    by = c("session", "version", "model", "calls")
   ) |>
   mutate(
-    min_ess_per_second = min_ess_bulk / seconds,
-    median_ess_per_second = median_ess_bulk / seconds,
-    run = factor(run, labels = run_labels)
+    smallest_ess_per_second = smallest_ess_bulk / seconds,
+    median_ess_per_second = median_ess_bulk / seconds
+  )
+
+efficiency_means <- efficiency |>
+  group_by(model, calls, version) |>
+  summarise(
+    smallest_ess_per_second = mean(smallest_ess_per_second),
+    median_ess_per_second = mean(median_ess_per_second),
+    .groups = "drop"
   )
 ```
 
@@ -626,54 +761,74 @@ efficiency <- posterior |>
 ### Smallest bulk ESS per second
 
 ```{r}
-#| label: plot-efficiency-min
-#| fig-cap: !expr run_caption
-gg_dots(efficiency, run, min_ess_per_second, y_label = "Smallest bulk ESS per second")
+#| label: plot-efficiency-smallest
+#| fig-cap: !expr call_caption
+#| fig-height: 9
+ggplot(efficiency, aes(x = smallest_ess_per_second, y = version, colour = version)) +
+  geom_point(data = efficiency_means, size = 5, alpha = 0.25) +
+  geom_point(position = jitter, size = 1.2) +
+  version_scale +
+  facet_wrap(vars(model, calls), ncol = 2, scales = "free_x") +
+  labs(x = "Smallest bulk ESS per second", y = NULL)
 ```
 
 ### Median bulk ESS per second
 
 ```{r}
 #| label: plot-efficiency-median
-#| fig-cap: !expr run_caption
-gg_dots(efficiency, run, median_ess_per_second, y_label = "Median bulk ESS per second")
+#| fig-cap: !expr call_caption
+#| fig-height: 9
+ggplot(efficiency, aes(x = median_ess_per_second, y = version, colour = version)) +
+  geom_point(data = efficiency_means, size = 5, alpha = 0.25) +
+  geom_point(position = jitter, size = 1.2) +
+  version_scale +
+  facet_wrap(vars(model, calls), ncol = 2, scales = "free_x") +
+  labs(x = "Median bulk ESS per second", y = NULL)
 ```
 
 :::
 
-<details><summary>Table</summary>
+<details><summary>Table: mean ESS per second</summary>
+
+```{r}
+#| label: table-efficiency-means
+dt_table(efficiency_means, digits = 1)
+```
+
+</details>
+
+<details><summary>Table: every call</summary>
 
 ```{r}
 #| label: table-efficiency
 efficiency |>
-  group_by(model, run, version) |>
-  summarise(
-    runs = n(),
-    smallest_min = min(min_ess_per_second),
-    median_min = median(min_ess_per_second),
-    largest_min = max(min_ess_per_second),
-    median_median = median(median_ess_per_second),
-    .groups = "drop"
-  ) |>
-  knitr::kable(digits = 1)
+  select(session, version, model, calls, seconds, smallest_ess_bulk, median_ess_bulk, smallest_ess_per_second, median_ess_per_second) |>
+  dt_table(digits = 1)
 ```
 
 </details>
 
 ## Convergence
 
-For each `mcmc()` run, the largest $\hat{R}$ and the smallest bulk ESS over the model's parameters.
+For each `mcmc()` call, the largest rank-normalised split-$\hat{R}$ and the smallest bulk ESS over the model's parameters [@vehtari2021].
 
 ```{r}
 #| label: convergence
 convergence <- posterior |>
-  group_by(session, version, model, run) |>
+  group_by(session, version, model, calls) |>
   summarise(
-    max_rhat = max(rhat),
-    min_ess_bulk = min(ess_bulk),
+    largest_rhat = max(rhat),
+    smallest_ess_bulk = min(ess_bulk),
     .groups = "drop"
-  ) |>
-  mutate(run = factor(run, labels = run_labels))
+  )
+
+convergence_means <- convergence |>
+  group_by(model, calls, version) |>
+  summarise(
+    largest_rhat = mean(largest_rhat),
+    smallest_ess_bulk = mean(smallest_ess_bulk),
+    .groups = "drop"
+  )
 ```
 
 ::: panel-tabset
@@ -682,54 +837,57 @@ convergence <- posterior |>
 
 ```{r}
 #| label: plot-rhat
-#| fig-cap: !expr run_caption
-gg_dots(convergence, run, max_rhat, y_label = "Largest R-hat")
+#| fig-cap: !expr call_caption
+#| fig-height: 9
+ggplot(convergence, aes(x = largest_rhat, y = version, colour = version)) +
+  geom_point(data = convergence_means, size = 5, alpha = 0.25) +
+  geom_point(position = jitter, size = 1.2) +
+  version_scale +
+  facet_wrap(vars(model, calls), ncol = 2, scales = "free_x") +
+  labs(x = "Largest R-hat", y = NULL)
 ```
 
 ### Smallest bulk ESS
 
 ```{r}
 #| label: plot-ess
-#| fig-cap: !expr run_caption
-gg_dots(convergence, run, min_ess_bulk, y_label = "Smallest bulk ESS")
+#| fig-cap: !expr call_caption
+#| fig-height: 9
+ggplot(convergence, aes(x = smallest_ess_bulk, y = version, colour = version)) +
+  geom_point(data = convergence_means, size = 5, alpha = 0.25) +
+  geom_point(position = jitter, size = 1.2) +
+  version_scale +
+  facet_wrap(vars(model, calls), ncol = 2, scales = "free_x") +
+  labs(x = "Smallest bulk ESS", y = NULL)
 ```
 
 :::
 
-<details><summary>Table</summary>
+<details><summary>Table: every call</summary>
 
 ```{r}
 #| label: table-convergence
-convergence |>
-  group_by(model, run, version) |>
-  summarise(
-    runs = n(),
-    largest_rhat = max(max_rhat),
-    smallest_ess_bulk = min(min_ess_bulk),
-    .groups = "drop"
-  ) |>
-  knitr::kable(digits = 3)
+dt_table(convergence)
 ```
 
 </details>
 
 ## Agreement
 
-Whether two versions estimate the same posterior means, in Monte Carlo standard errors. For each parameter, each version's means and their standard errors are pooled over all of its runs, and the two versions are compared with
+Whether two versions estimate the same posterior means. The difference between two versions' means is divided by the Monte Carlo standard error (MCSE) of that difference, so a difference can be told apart from Monte Carlo noise [@vehtari2021; @magnusson2025]. For each parameter, each version's means and MCSEs are pooled over all of its `mcmc()` calls, and
 
 $$
 z = \frac{\bar\theta_{\text{b}} - \bar\theta_{\text{a}}}{\sqrt{\text{se}^2_{\text{a}} + \text{se}^2_{\text{b}}}}.
 $$
 
-The runs are independent, so the pooled standard error is $\sqrt{\sum \text{mcse}^2} / n$ over a version's $n$ runs. Seeded runs of two versions that both respect `set.seed()` return the same draws, and so a $z$ of zero.
+The calls are independent, so a version's pooled standard error is $\sqrt{\sum \text{mcse}^2} / n$ over its $n$ calls. If both versions sample the same posterior, each $z$ is close to a standard normal draw. Seeded calls of two versions that both respect `set.seed()` return the same draws, and so a $z$ of zero.
 
 ```{r}
-#| label: plot-agreement
-#| fig-cap: "Each dot is one parameter."
+#| label: agreement
 pooled <- posterior |>
   group_by(version, model, variable) |>
   summarise(
-    runs = n(),
+    calls = n(),
     mean = mean(mean),
     se = sqrt(sum(mcse_mean^2)) / n(),
     .groups = "drop"
@@ -748,20 +906,41 @@ agreement <- lapply(seq_len(ncol(pairs)), function(i) {
   bind_rows() |>
   mutate(comparison = factor(comparison, levels = unique(comparison)))
 
-ggplot(agreement, aes(x = model, y = z)) +
-  geom_point(
-    position = position_jitter(width = 0.15, height = 0, seed = 2026),
-    alpha = 0.6
-  ) +
-  facet_wrap(~comparison, ncol = 1) +
-  labs(x = NULL, y = "z") +
-  theme(axis.text.x = element_text(angle = 30, hjust = 1))
+# the band all of a comparison's z fall inside with probability 0.95 when both
+# versions sample the same posterior: a Bonferroni bound over its parameters
+parameters_compared <- n_distinct(paste(agreement$model, agreement$variable))
+band <- qnorm(1 - 0.05 / (2 * parameters_compared))
+
+outside_band <- agreement |>
+  group_by(comparison) |>
+  summarise(outside = sum(abs(z) > band), largest_abs_z = max(abs(z)))
 ```
 
-<details><summary>Table</summary>
+The grey band is $\pm$ `{r} format_number(band)`: if two versions sample the same posterior, all `{r} parameters_compared` parameters' $z$ fall inside it with probability at least 0.95, by a Bonferroni bound. Parameters outside it, per comparison: `{r} paste(outside_band$comparison, outside_band$outside, collapse = ", ")`.
 
 ```{r}
-#| label: table-agreement
+#| label: plot-agreement
+#| fig-cap: "Each dot is one parameter. The grey band is where every parameter's z falls, with probability at least 0.95, when both versions sample the same posterior."
+#| fig-height: 7
+ggplot(agreement, aes(x = z, y = model)) +
+  annotate(
+    "rect",
+    xmin = -band,
+    xmax = band,
+    ymin = -Inf,
+    ymax = Inf,
+    fill = "grey80",
+    alpha = 0.5
+  ) +
+  geom_point(position = jitter, alpha = 0.7) +
+  facet_wrap(~comparison, ncol = 1) +
+  labs(x = "z", y = NULL)
+```
+
+<details><summary>Table: largest |z| per comparison and model</summary>
+
+```{r}
+#| label: table-agreement-summary
 agreement |>
   group_by(comparison, model) |>
   summarise(
@@ -770,14 +949,199 @@ agreement |>
     parameter = variable[which.max(abs(z))],
     .groups = "drop"
   ) |>
-  knitr::kable(digits = 2)
+  dt_table(digits = 2)
 ```
 
 </details>
 
+<details><summary>Table: every parameter</summary>
+
+```{r}
+#| label: table-agreement
+agreement |>
+  select(comparison, model, variable, mean_a, se_a, mean_b, se_b, z) |>
+  dt_table()
+```
+
+</details>
+
+## Traceplots
+
+Every `{r} settings$keep_every_nth_draw`th draw of each chain from session 1's first `mcmc()` call on each model, numbered from the end of warmup.
+
+```{r}
+#| label: traceplots
+gg_trace <- function(name, version_label) {
+  draws |>
+    filter(session == 1, model == name, version == version_label) |>
+    ggplot(aes(x = draw, y = value, colour = factor(chain))) +
+    geom_line(linewidth = 0.3) +
+    facet_wrap(~variable, scales = "free_y", ncol = 4) +
+    labs(x = "Draw", y = NULL, colour = "Chain")
+}
+
+trace_height <- function(name) {
+  1 + 1.6 * ceiling(parameter_count(name) / 4)
+}
+```
+
+::: panel-tabset
+
+### linear
+
+::: panel-tabset
+
+#### CRAN
+
+```{r}
+#| label: plot-trace-linear-cran
+#| fig-height: !expr trace_height("linear")
+gg_trace("linear", "CRAN")
+```
+
+#### main
+
+```{r}
+#| label: plot-trace-linear-main
+#| fig-height: !expr trace_height("linear")
+gg_trace("linear", "main")
+```
+
+#### #843
+
+```{r}
+#| label: plot-trace-linear-843
+#| fig-height: !expr trace_height("linear")
+gg_trace("linear", "#843")
+```
+
+:::
+
+### multiple_linear
+
+::: panel-tabset
+
+#### CRAN
+
+```{r}
+#| label: plot-trace-multiple-linear-cran
+#| fig-height: !expr trace_height("multiple_linear")
+gg_trace("multiple_linear", "CRAN")
+```
+
+#### main
+
+```{r}
+#| label: plot-trace-multiple-linear-main
+#| fig-height: !expr trace_height("multiple_linear")
+gg_trace("multiple_linear", "main")
+```
+
+#### #843
+
+```{r}
+#| label: plot-trace-multiple-linear-843
+#| fig-height: !expr trace_height("multiple_linear")
+gg_trace("multiple_linear", "#843")
+```
+
+:::
+
+### hierarchical_linear
+
+::: panel-tabset
+
+#### CRAN
+
+```{r}
+#| label: plot-trace-hierarchical-linear-cran
+#| fig-height: !expr trace_height("hierarchical_linear")
+gg_trace("hierarchical_linear", "CRAN")
+```
+
+#### main
+
+```{r}
+#| label: plot-trace-hierarchical-linear-main
+#| fig-height: !expr trace_height("hierarchical_linear")
+gg_trace("hierarchical_linear", "main")
+```
+
+#### #843
+
+```{r}
+#| label: plot-trace-hierarchical-linear-843
+#| fig-height: !expr trace_height("hierarchical_linear")
+gg_trace("hierarchical_linear", "#843")
+```
+
+:::
+
+### eight_schools
+
+::: panel-tabset
+
+#### CRAN
+
+```{r}
+#| label: plot-trace-eight-schools-cran
+#| fig-height: !expr trace_height("eight_schools")
+gg_trace("eight_schools", "CRAN")
+```
+
+#### main
+
+```{r}
+#| label: plot-trace-eight-schools-main
+#| fig-height: !expr trace_height("eight_schools")
+gg_trace("eight_schools", "main")
+```
+
+#### #843
+
+```{r}
+#| label: plot-trace-eight-schools-843
+#| fig-height: !expr trace_height("eight_schools")
+gg_trace("eight_schools", "#843")
+```
+
+:::
+
+### cjs
+
+::: panel-tabset
+
+#### CRAN
+
+```{r}
+#| label: plot-trace-cjs-cran
+#| fig-height: !expr trace_height("cjs")
+gg_trace("cjs", "CRAN")
+```
+
+#### main
+
+```{r}
+#| label: plot-trace-cjs-main
+#| fig-height: !expr trace_height("cjs")
+gg_trace("cjs", "main")
+```
+
+#### #843
+
+```{r}
+#| label: plot-trace-cjs-843
+#| fig-height: !expr trace_height("cjs")
+gg_trace("cjs", "#843")
+```
+
+:::
+
+:::
+
 ## Posterior densities
 
-Draws from each session's first run, `{r} settings$kept_draws_per_run` per run spread evenly through it, pooled over sessions.
+The same kept draws, from every session's first `mcmc()` call, pooled over sessions.
 
 ```{r}
 #| label: densities
@@ -787,7 +1151,7 @@ gg_densities <- function(name) {
     ggplot(aes(x = value, colour = version)) +
     geom_density() +
     scale_colour_manual(values = version_colours) +
-    facet_wrap(~variable, scales = "free") +
+    facet_wrap(~variable, scales = "free", ncol = 4) +
     labs(x = NULL, y = NULL, colour = NULL)
 }
 
@@ -820,6 +1184,7 @@ identical_text <- if (length(identical_pairs) == 0) {
 
 ```{r}
 #| label: plot-densities-linear
+#| fig-height: !expr trace_height("linear")
 gg_densities("linear")
 ```
 
@@ -827,6 +1192,7 @@ gg_densities("linear")
 
 ```{r}
 #| label: plot-densities-multiple-linear
+#| fig-height: !expr trace_height("multiple_linear")
 gg_densities("multiple_linear")
 ```
 
@@ -834,6 +1200,7 @@ gg_densities("multiple_linear")
 
 ```{r}
 #| label: plot-densities-hierarchical-linear
+#| fig-height: !expr trace_height("hierarchical_linear")
 gg_densities("hierarchical_linear")
 ```
 
@@ -841,6 +1208,7 @@ gg_densities("hierarchical_linear")
 
 ```{r}
 #| label: plot-densities-eight-schools
+#| fig-height: !expr trace_height("eight_schools")
 gg_densities("eight_schools")
 ```
 
@@ -848,7 +1216,7 @@ gg_densities("eight_schools")
 
 ```{r}
 #| label: plot-densities-cjs
-#| fig-height: 10
+#| fig-height: !expr trace_height("cjs")
 gg_densities("cjs")
 ```
 
@@ -864,3 +1232,8 @@ gg_densities("cjs")
 #| eval: false
 #| code-fold: false
 ```
+
+## References
+
+::: {#refs}
+:::

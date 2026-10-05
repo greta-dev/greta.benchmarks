@@ -21,6 +21,10 @@ New benchmarks are posts, in `posts/YYYY-MM-DD-short-name-iNNN/`, copied from
 - **Everything measured is inside `run.R`'s `benchmark` expression**: models,
   settings and timed calls. No helpers from `R/` and nothing sourced, so a
   reader sees all of the code that ran.
+- **One process per version per session, running every model.** A post does
+  not follow "One measurement, one process" below: each session gives each
+  version one fresh process, which runs every measurement in `run.R`'s order,
+  with the versions in a new random order each session. The page says so.
 - **The page shows code by reading it out of `run.R`**, with `parse()` and
   source references, not by copying it. A copy drifts; a read cannot.
 - **The page never runs greta.** It reads `results/`, so rendering is cheap and
@@ -29,6 +33,22 @@ New benchmarks are posts, in `posts/YYYY-MM-DD-short-name-iNNN/`, copied from
   Pages.
 - **Smoke-run `run.R` first**, from a scratch copy with small settings and one
   version, and render the page against that before the full run.
+- **Save results with `saveRDS(..., compress = "xz")`**, the smallest of
+  R's compressions, since results are committed.
+- **Say "calls" for timed calls and "draws" for kept samples.** "Iterations"
+  means sampler iterations only; bench::mark()'s `iterations` argument is the
+  exception, and is commented where it is used.
+- **Seconds, or whatever is measured, go on the x axis**, with versions on the
+  y axis.
+- **Summaries sit underneath the raw data**: a large transparent dot behind
+  every call's small dot, so the mean never hides a measurement.
+- **Each section's code computes its own summaries**, such as `build_means` and
+  `build_medians`, so the folded code shows the statistic behind each plot and
+  each quoted number.
+- **Data tables go in collapsed `<details>` sections, as
+  `DT::datatable()`**, except a short table the prose depends on.
+- **Show traceplots beside posterior densities**, and draw the agreement plot's
+  band with its method cited.
 - **Leave the machine idle while `run.R` runs.** Rendering a page, a smoke
   test or a browser alongside it lands in the timings. If something did run
   alongside, delete those sessions' files and rerun `run.R`, which makes only

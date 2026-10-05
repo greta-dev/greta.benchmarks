@@ -40,6 +40,7 @@ jobs:
             any::tidyr
             any::tibble
             any::ggplot2
+            any::DT
 
       - uses: actions/configure-pages@v6
 

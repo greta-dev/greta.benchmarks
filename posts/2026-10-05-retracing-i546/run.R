@@ -21,15 +21,17 @@ benchmark <- quote({
   library(greta)
 
   session <- as.integer(Sys.getenv("GRETA_BENCH_SESSION"))
+  # warmup and n_samples are mcmc()'s arguments, so they count draws; the
+  # *_calls settings count timed calls
   settings <- list(
     warmup = 1000,
     n_samples = 1000,
     chains = 4,
     n_cores = 4,
-    build_iterations = 5,
-    opt_iterations = 5,
-    hessian_iterations = 3,
-    kept_draws_per_run = 250
+    build_calls = 5,
+    opt_calls = 5,
+    hessian_calls = 3,
+    keep_every_nth_draw = 10
   )
 
   models <- list(
@@ -151,10 +153,10 @@ benchmark <- quote({
     )
   }
 
-  # Iterations per kept draw. A random walk on a target far wider than its
-  # steps accepts every proposal, so the variance between kept draws over one
-  # step's variance counts the iterations between them. It is also the
-  # session's first mcmc() call, so TensorFlow's start-up costs fall here
+  # Sampler iterations per kept draw. A random walk on a target far wider than
+  # its steps accepts every proposal, so the variance between kept draws over
+  # one step's variance counts the sampler iterations between them. It is also
+  # the session's first mcmc() call, so TensorFlow's start-up costs fall here
   # rather than on the first model.
   step_sd <- 0.1
   x <- normal(0, 1e6)
@@ -168,35 +170,38 @@ benchmark <- quote({
     initial_values = initials(x = 0),
     verbose = FALSE
   )
-  iterations_per_draw <- round(var(diff(as.vector(walk[[1]]))) / step_sd^2)
+  sampler_iterations_per_draw <- round(
+    var(diff(as.vector(walk[[1]]))) / step_sd^2
+  )
 
-  build <- lapply(names(models), function(name) {
+  # bench::mark()'s `iterations` is how many times it calls the expression
+  build_timings <- lapply(names(models), function(name) {
     mark <- bench::mark(
       models[[name]](),
-      iterations = settings$build_iterations,
+      iterations = settings$build_calls,
       check = FALSE,
       memory = FALSE,
       filter_gc = FALSE
     )
     data.frame(
       model = name,
-      call = seq_len(settings$build_iterations),
+      call = seq_len(settings$build_calls),
       seconds = as.numeric(mark$time[[1]])
     )
   })
 
-  opt_calls <- lapply(names(models), function(name) {
+  opt_timings <- lapply(names(models), function(name) {
     m <- models[[name]]()
     mark <- bench::mark(
       opt(m),
-      iterations = settings$opt_iterations,
+      iterations = settings$opt_calls,
       check = FALSE,
       memory = FALSE,
       filter_gc = FALSE
     )
     data.frame(
       model = name,
-      call = seq_len(settings$opt_iterations),
+      call = seq_len(settings$opt_calls),
       seconds = as.numeric(mark$time[[1]])
     )
   })
@@ -205,27 +210,27 @@ benchmark <- quote({
   hessian_warnings <- count_retracing_warnings(
     hessian_mark <- bench::mark(
       opt(m, hessian = TRUE),
-      iterations = settings$hessian_iterations,
+      iterations = settings$hessian_calls,
       check = FALSE,
       memory = FALSE,
       filter_gc = FALSE
     )
   )
   hessian <- data.frame(
-    call = seq_len(settings$hessian_iterations),
+    call = seq_len(settings$hessian_calls),
     seconds = as.numeric(hessian_mark$time[[1]]),
     retracing_warnings_in_all_calls = hessian_warnings
   )
 
-  # two mcmc() runs on each model: the first traces its functions, the second
-  # reuses them
-  mcmc_runs <- list()
+  # two mcmc() calls on each model: the first traces the model's TensorFlow
+  # functions, and the second, on the same model, reuses them
+  mcmc_calls <- list()
   posterior_summaries <- list()
   kept_draws <- list()
   for (name in names(models)) {
     m <- models[[name]]()
-    for (run in 1:2) {
-      set.seed(session * 10 + run)
+    for (call in 1:2) {
+      set.seed(session * 10 + call)
       n_warnings <- count_retracing_warnings(
         elapsed <- bench::bench_time(
           draws <- mcmc(
@@ -239,19 +244,19 @@ benchmark <- quote({
         )[["real"]]
       )
       sampler <- attr(draws, "model_info")$samplers[[1]]
-      run_name <- paste(name, run)
-      mcmc_runs[[run_name]] <- data.frame(
+      call_name <- paste(name, call)
+      mcmc_calls[[call_name]] <- data.frame(
         model = name,
-        run = run,
+        call = call,
         seconds = as.numeric(elapsed),
         retracing_warnings = n_warnings,
         log_prob_traces = traces(m$dag$tf_log_prob_function),
         trace_values_traces = traces(m$dag$tf_trace_values_batch),
         sampler_traces = traces(sampler$tf_evaluate_sample_batch)
       )
-      posterior_summaries[[run_name]] <- data.frame(
+      posterior_summaries[[call_name]] <- data.frame(
         model = name,
-        run = run,
+        call = call,
         posterior::summarise_draws(
           draws,
           "mean",
@@ -262,18 +267,26 @@ benchmark <- quote({
           "ess_tail"
         )
       )
-      if (run == 1) {
-        draws_matrix <- do.call(rbind, lapply(draws, as.matrix))
-        kept_rows <- round(seq(
-          1,
-          nrow(draws_matrix),
-          length.out = settings$kept_draws_per_run
-        ))
-        kept <- draws_matrix[kept_rows, , drop = FALSE]
-        kept_draws[[name]] <- data.frame(
-          model = name,
-          variable = rep(colnames(kept), each = nrow(kept)),
-          value = as.vector(kept)
+      # every nth draw of each chain from the first call, numbered from the end
+      # of warmup, for traceplots and densities
+      if (call == 1) {
+        kept <- seq(
+          settings$keep_every_nth_draw,
+          settings$n_samples,
+          by = settings$keep_every_nth_draw
+        )
+        kept_draws[[name]] <- do.call(
+          rbind,
+          lapply(seq_along(draws), function(chain) {
+            chain_draws <- as.matrix(draws[[chain]])[kept, , drop = FALSE]
+            data.frame(
+              model = name,
+              chain = chain,
+              draw = rep(kept, times = ncol(chain_draws)),
+              variable = rep(colnames(chain_draws), each = length(kept)),
+              value = as.vector(chain_draws)
+            )
+          })
         )
       }
     }
@@ -297,11 +310,11 @@ benchmark <- quote({
     session = session,
     settings = settings,
     provenance = provenance,
-    iterations_per_draw = iterations_per_draw,
-    build = do.call(rbind, build),
-    opt = do.call(rbind, opt_calls),
+    sampler_iterations_per_draw = sampler_iterations_per_draw,
+    build = do.call(rbind, build_timings),
+    opt = do.call(rbind, opt_timings),
     hessian = hessian,
-    mcmc = do.call(rbind, mcmc_runs),
+    mcmc = do.call(rbind, mcmc_calls),
     posterior = do.call(rbind, posterior_summaries),
     draws = do.call(rbind, kept_draws)
   )
@@ -341,6 +354,7 @@ for (session in seq_len(n_sessions)) {
       order = order,
       results = setNames(measured$result, order)
     ),
-    session_file
+    session_file,
+    compress = "xz"
   )
 }
