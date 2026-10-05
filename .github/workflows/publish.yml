@@ -45,6 +45,8 @@ jobs:
             any::posterior
             any::sessioninfo
             any::withr
+            any::ggdist
+            any::here
 
       - uses: actions/configure-pages@v6
 

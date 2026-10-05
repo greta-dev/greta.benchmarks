@@ -36,7 +36,9 @@ for (session in seq_len(n_sessions)) {
   # cross::run_versions() installs each version into a library of its own and
   # evaluates the expression in a fresh R session against it. That session
   # cannot see this one's variables, so the script's path and the session
-  # number reach it as environment variables.
+  # number reach it as environment variables: args_callr is passed on to
+  # callr::r(), whose `env` sets variables for the child process (see ?callr::r
+  # and ?callr::rcmd_safe_env, whose defaults are kept).
   measured <- cross::run_versions(
     source(Sys.getenv("GRETA_BENCH_SCRIPT"), local = TRUE)$value,
     pkgs = unname(versions[order]),

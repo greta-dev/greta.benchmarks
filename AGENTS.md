@@ -59,15 +59,31 @@ New benchmarks are posts, in `posts/YYYY-MM-DD-short-name-iNNN/`, copied from
   exception, and is commented where it is used.
 - **Seconds, or whatever is measured, go on the x axis**, with versions on the
   y axis.
-- **Summaries sit underneath the raw data**: a large transparent dot behind
-  every call's small dot, so the mean never hides a measurement.
-- **Each section's code computes its own summaries**, such as `build_means` and
-  `build_medians`, so the folded code shows the statistic behind each plot and
-  each quoted number.
+- **Summaries sit underneath the raw data**, drawn first and faint. Timings
+  are rainclouds ({ggdist}: density, box plot, and every call as a fixed-size
+  dot); per-session values are small dots over a large faint mean.
+- **Each section's code computes its own summaries**, such as `build_summary`
+  and `build_medians`, so the folded code shows the statistic behind each plot
+  and each quoted number.
+- **A timing's table is bench's own `summary()`** of every mark, with the mean
+  and the longest call added, so min, median, mean and max are all there.
 - **Data tables go in collapsed `<details>` sections, as
   `DT::datatable()`**, except a short table the prose depends on.
+- **Fold all code by default.** A script section's chunk gets a
+  `code-summary` naming its file and label, and the prose links the section to
+  its lines on GitHub with `section_link()`.
+- **Versions are never tabs.** Traceplots get one row of panels per version,
+  each parameter's panels sharing its range down the column, in a page-wide
+  figure. Posterior densities overlay the versions in one panel per parameter,
+  told apart by colour and line type, so they can be compared directly.
 - **Show traceplots beside posterior densities**, and draw the agreement plot's
-  band with its method cited.
+  band with its method cited. Efficiency is ESS per second, citing Girolami
+  and Calderhead (2011) and Hoffman and Gelman (2014).
+- **Give chunk `file:` options paths relative to the post.** A `here()` path
+  there breaks rendering the post on its own.
+- **Wrap inline `{r}` results that hold markdown in `I()`.** Quarto escapes
+  them otherwise, so a link shows as `[text](url)` instead of a link. Links in
+  a `knitr::kable()` table are not affected.
 - **Leave the machine idle while `run.R` runs.** Rendering a page, a smoke
   test or a browser alongside it lands in the timings. If something did run
   alongside, delete those sessions' files and rerun `run.R`, which makes only
