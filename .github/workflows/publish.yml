@@ -42,6 +42,9 @@ jobs:
             any::ggplot2
             any::DT
             any::bench
+            any::posterior
+            any::sessioninfo
+            any::withr
 
       - uses: actions/configure-pages@v6
 

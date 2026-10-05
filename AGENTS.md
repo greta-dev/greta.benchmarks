@@ -22,19 +22,30 @@ New benchmarks are posts, in `posts/YYYY-MM-DD-short-name-iNNN/`, copied from
   `# ---- label ----` sections: settings, one section per model, one per
   timed measurement. No helpers from `R/`, so a reader sees all of the code
   that ran. `run.R` only installs versions and sources `benchmark.R` in each.
-- **Loop over models with `bench::press()`, not `lapply()`.**
-- **Save every timing as the `bench_mark` object bench made.** Add columns if
-  needed (trace counts, posterior summaries), but never pull the seconds out
-  into a new data frame, so `summary()`, `autoplot()` and the reader's own
-  analysis work on the saved objects. `check = FALSE` leaves the `result`
-  column empty, so no greta model is saved with them.
+- **Write one `mark()` call per model**, each in its own labelled section such
+  as `bench-opt-linear`, starting with a bare line that prints the model's
+  function. No loop over models, so each timing can be read, run and referred
+  to on its own.
+- **Seed right before each timed call** that draws random numbers, with
+  `set.seed(session_seed)`, a seed of its own per session. Simulate a model's
+  data once, outside its function, with `withr::with_seed()`, so building a
+  model never resets the session's random numbers.
+- **Save every timing as the `bench_mark` object `mark()` made**, and save other
+  measurements (trace counts, warnings) beside it, never in it, so
+  `summary()`, `autoplot()` and the reader's own analysis work on the saved
+  objects. `check = FALSE` leaves the `result` column empty, so no greta model
+  is saved with them.
+- **Save draws whole**, as `posterior::as_draws_array()`, not thinned. The page
+  computes every posterior summary from them.
 - **One process per version per session, running every model.** A post does
   not follow "One measurement, one process" below: each session gives each
   version one fresh process, which runs `benchmark.R` top to bottom, with the
   versions in a new random order each session. The page says so.
 - **The page shows code by its section label**, with `knitr::read_chunk()` and
   an empty chunk of the same label, not by copying it. A copy drifts; a read
-  cannot. Refer to sections by label in the prose.
+  cannot. Refer to sections by label in the prose. To print a section's model,
+  run only that line with `eval: !expr 1` (quarto rejects a bare number); knitr
+  shows the lines it skips with `##` in front.
 - **The page never runs greta.** It reads `results/`, so rendering is cheap and
   the GitHub Actions workflow needs no Python.
 - **Do not track HTML.** The workflow renders the site and deploys it to GitHub

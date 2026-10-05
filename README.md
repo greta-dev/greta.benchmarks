@@ -30,10 +30,11 @@ _template/                       a post to copy
 A post's `benchmark.R` holds all of the code that is measured: the settings,
 each model, and each timed call, as a flat script in labelled sections.
 `run.R` has `cross::run_versions()` source it in a fresh R session for each
-version, in each session. Every timing is a `bench::mark()`, looped over models
-with `bench::press()`, and is saved as the `bench_mark` object bench made, so
-`summary()` and `autoplot()` work on it. The page reads `results/` and never
-runs greta, and shows each section of the scripts by its label with
+version, in each session. Every timing is one `mark()` call per model, written
+out in a section of its own, and is saved as the `bench_mark` object `mark()`
+made, so `summary()` and `autoplot()` work on it. Each model's draws are saved
+whole, as posterior draws arrays. The page reads `results/` and never runs
+greta, and shows each section of the scripts by its label with
 `knitr::read_chunk()`, so the code shown is the code that ran.
 
 To make a post:
