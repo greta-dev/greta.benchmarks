@@ -8,12 +8,13 @@
 # starts a section that index.qmd shows by that label.
 
 # ---- run-versions ----
-# The warmup schemes are the branch's own, so it is the only version. It was
-# not on GitHub when this ran, so pak installed it from its worktree, clean at
-# commit 92f34e3003c5db24f67534d4c9abe3255ee39ccf. Three sessions rather than
-# five, since NUTS takes several times as long as the rest
+# The warmup schemes are the tf-warmup-i547 branch's own, so it is the only
+# version. It was not on GitHub when this ran, so pak installed this commit
+# from its worktree, clean at the commit, and the saved results record that
+# local path. Three sessions rather than five, since NUTS takes several times
+# as long as the rest
 versions <- c(
-  branch = "local::/Users/nick_1/github/greta-dev/greta/.claude/worktrees/tf-warmup-i547"
+  branch = "greta-dev/greta@92f34e3003c5db24f67534d4c9abe3255ee39ccf"
 )
 n_sessions <- 3
 post_dir <- here::here("posts", "2026-10-07-warmup-adaptation-i853")

@@ -9,18 +9,17 @@
 # starts a section that index.qmd shows by that label.
 
 # ---- run-versions ----
-# Pin main and #850 to commits: both move, and the post links each one. The
-# branch was not on GitHub when this ran, so pak installed both of its commits
-# from worktrees, each clean at its commit: tf-warmup, with warmup in
-# TensorFlow, at 59da5cc9ef79eae5437072b8f1837e466ea7196a, and branch, which
-# adds functions traced for the sampler's number of chains, at
-# 92f34e3003c5db24f67534d4c9abe3255ee39ccf
+# Pin every version to a commit: they move, and the post links each one.
+# tf-warmup has warmup in TensorFlow; branch adds functions traced for the
+# sampler's number of chains. Both are commits of the tf-warmup-i547 branch,
+# which was not on GitHub when this ran, so pak installed them from worktrees,
+# each clean at its commit, and the saved results record those local paths
 versions <- c(
   CRAN = "greta@0.6.0",
   main = "greta-dev/greta@0a22f8c7e63ac32fa0926cdf67a85c9f69acd1d5",
   `#850` = "greta-dev/greta@5a02f6c5ff5497363ac4bf419368bb3c5925d5cb",
-  `tf-warmup` = "local::/private/tmp/claude-503/-Users-nick-1-github-greta-dev-greta/cca561be-48bb-4249-8b64-008822ac3645/scratchpad/base-59da",
-  branch = "local::/Users/nick_1/github/greta-dev/greta/.claude/worktrees/tf-warmup-i547"
+  `tf-warmup` = "greta-dev/greta@59da5cc9ef79eae5437072b8f1837e466ea7196a",
+  branch = "greta-dev/greta@92f34e3003c5db24f67534d4c9abe3255ee39ccf"
 )
 n_sessions <- 5
 post_dir <- here::here("posts", "2026-10-07-tf-warmup-i547")

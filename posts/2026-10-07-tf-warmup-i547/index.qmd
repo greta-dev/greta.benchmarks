@@ -77,6 +77,14 @@ sessions <- list.files(
   lapply(readRDS)
 
 versions <- sessions[[1]]$versions
+# pak installed the branch's two commits from worktrees, which the results
+# record as local paths; run.R names the same commits on GitHub
+on_github <- c(
+  `tf-warmup` = "greta-dev/greta@59da5cc9ef79eae5437072b8f1837e466ea7196a",
+  branch = "greta-dev/greta@92f34e3003c5db24f67534d4c9abe3255ee39ccf"
+)
+installed_locally <- startsWith(versions, "local::")
+versions[installed_locally] <- on_github[names(versions)[installed_locally]]
 version_levels <- names(versions)
 version_colours <- setNames(
   c("#E69F00", "#56B4E9", "#009E73", "#D55E00", "#CC79A7")[seq_along(
