@@ -1,20 +1,26 @@
 # Runs benchmark.R against CRAN, main and a branch of greta, in a fresh R
-# session per version, in five sessions:
+# session per version, in six sessions:
 #
 #   Rscript --quiet --vanilla posts/YYYY-MM-DD-short-name-iNNN/run.R
 #
 # Each session writes results/session-<n>.rds, and sessions already there are
 # skipped, so a rerun after a crash carries on. Each `# ---- label ----` line
-# starts a section that index.qmd shows by that label.
+# starts a section that index.qmd shows by that label. Keep the machine idle
+# while it runs, and on mains power, with the lid open: a session that
+# overlaps other work, or a sleep, is not a measurement.
 
 # ---- run-versions ----
-# pin main and the branch to commits: both move, and the post links each one
+# Pin every version to a commit: branches move, and the post links each one.
+# The version the post is about goes last, which is where the page's colours
+# expect it.
 versions <- c(
   CRAN = "greta@0.6.0",
   main = "greta-dev/greta@REPLACE-WITH-MAIN-COMMIT",
   `#NNN` = "greta-dev/greta@REPLACE-WITH-BRANCH-COMMIT"
 )
-n_sessions <- 5
+# a multiple of the number of versions, so each takes each place in the order
+# equally often
+n_sessions <- 6
 post_dir <- here::here("posts", "YYYY-MM-DD-short-name-iNNN")
 
 # ---- run-sessions ----
@@ -30,8 +36,14 @@ for (session in seq_len(n_sessions)) {
     next
   }
 
-  # a fresh order each session, so no version is always measured first or last
-  order <- sample(names(versions))
+  # The version that runs first in a session tends to be the slower, so the
+  # order rotates: each session starts one place further along. A random order
+  # can put one version first in four sessions of five, which then reads as a
+  # difference between the versions.
+  start <- (session - 1) %% length(versions)
+  order <- names(versions)[(seq_along(versions) + start - 1) %%
+    length(versions) +
+    1]
 
   # cross::run_versions() installs each version into a library of its own and
   # evaluates the expression in a fresh R session against it. That session

@@ -187,10 +187,14 @@ Raised by Nick, 2026-10-01, for later.
 **What happens.** The pipeline in `_targets.R` is the standing comparison: one
 store, one `report.html`, overwritten by every run. A dated run directory that
 wants the report has to copy `report.html` out by hand before the next run
-replaces it (`2026-10-01-thinning-i318/`, `2026-10-01-retracing-i546/`), and
-its `_targets` store is not kept. Dated directories that are not the pipeline,
-such as `2026-10-01-iterations-and-efficiency-i318/`, are numbered scripts
-with their own conventions.
+replaces it, and its `_targets` store is not kept. Dated directories that are
+not the pipeline, such as `2026-10-01-iterations-and-efficiency-i318/`, are
+numbered scripts with their own conventions.
+
+**Since then.** Posts (`posts/`, from 2026-10-05) are self-contained in the way
+this asks: each has its own `benchmark.R`, `run.R`, `results/` and page, and
+the page re-renders from `results/` without re-measuring. What is left open is
+whether the pipeline itself should become a post, or stay as it is.
 
 **The idea.** Each run directory is its own targets project, with its own
 `_targets.R` and store, so a run is self-contained: its results, the code that

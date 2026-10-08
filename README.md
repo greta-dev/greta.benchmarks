@@ -8,8 +8,10 @@ rather than at a number somebody typed out.
 <https://greta-dev.github.io/greta.benchmarks/>. Before them there were two
 halves, still described below: **the standing suite is a `targets` pipeline**
 at the repository root, and **dated run directories** answer one-off questions
-and are kept as lab notebook entries. They stay until the posts cover what they
-did.
+and are kept as lab notebook entries. The run directories still here are the
+ones something cites: greta's code, an issue or PR, or this repository's own
+notes (listed under [The runs still here](#the-runs-still-here)). The rest were
+removed on 2026-10-08, once the posts covered them, and are in git history.
 
 ## Posts
 
@@ -23,6 +25,9 @@ posts/2026-10-05-retracing-i546/
                                  session; run it to make results/
   results/session-<n>.rds        raw output, one file per session, committed
   index.qmd                      reads results/, shows each script section
+posts/_helpers.R                 what every page uses to show results: links
+                                 to script sections, number formatting, the
+                                 raincloud, tables, "Run it yourself" blocks
 _template/                       a post to copy
 .github/workflows/publish.yml    renders the site and deploys it to GitHub Pages
 ```
@@ -30,12 +35,29 @@ _template/                       a post to copy
 A post's `benchmark.R` holds all of the code that is measured: the settings,
 each model, and each timed call, as a flat script in labelled sections.
 `run.R` has `cross::run_versions()` source it in a fresh R session for each
-version, in each session. Every timing is one `mark()` call per model, written
-out in a section of its own, and is saved as the `bench_mark` object `mark()`
-made, so `summary()` and `autoplot()` work on it. Each model's draws are saved
-whole, as posterior draws arrays. The page reads `results/` and never runs
-greta, and shows each section of the scripts by its label with
-`knitr::read_chunk()`, so the code shown is the code that ran.
+version, in each session, rotating the order so each version runs first
+equally often (the version run first in a session tends to be the slower).
+Every timing is one `mark()` call per model, written out in a section of its
+own, and is saved as the `bench_mark` object `mark()` made, so `summary()` and
+`autoplot()` work on it. Each model's draws are saved whole, as posterior draws
+arrays. The page reads `results/` and never runs greta, and shows each section
+of the scripts by its label with `knitr::read_chunk()`, so the code shown is
+the code that ran.
+
+Under every figure, a page links the `benchmark.R` sections that timed it, and
+gives a "Run it yourself" block: those sections inside one
+`cross::run_versions()` call, built from the script, so a reader can repeat the
+measurement exactly. For that to be short, keep each timed section
+self-contained in a new post: it builds its own model and reads only the
+`setup` section's settings.
+
+The pages share their presentation helpers in `posts/_helpers.R`; anything that
+computes a number a post reports stays in that post, so changing the helpers
+can change how an old post looks but never what it found. How a page reads
+(title with the PR number and branch, a short opening, a collapsed "How it was
+tested" callout with the versions, models and scripts, one question and one
+figure per section, every ratio naming the slower version, no stray warnings) is
+written at the top of `_template/index.qmd`.
 
 To make a post:
 
@@ -45,8 +67,8 @@ To make a post:
    needs it.
 3. Run it: `Rscript --quiet --vanilla posts/<post>/run.R`. Sessions already in
    `results/` are skipped, so a rerun after a crash carries on.
-4. Edit `index.qmd`'s title, description and opening sentence, and look at it
-   with `quarto preview`.
+4. Edit `index.qmd`: its title, description, opening and one section per
+   question, as the comment at its top says. Look at it with `quarto preview`.
 5. Commit `benchmark.R`, `run.R`, `results/` and `index.qmd`. HTML is not
    tracked: pushing to main renders the site and deploys it.
 
@@ -276,15 +298,30 @@ ratios.
 If a cell is unresolved, raise `iterations` in `_targets.R` rather than
 reporting the median.
 
-## The runs so far
+## The runs still here
+
+Each is kept because something points at it, and a link to a run has to keep
+pointing at the numbers it was written about.
 
 ```
-2026-07-31-speed-and-ess/        speed and effective samples per second across
-                                 branches; predates the one-script-one-question
-                                 convention, so it is a harness plus numbered
-                                 experiments rather than a single run.R
-2026-08-05-keras3-vs-main/       does porting the optimisers to Keras 3 make
-                                 greta slower?
+2026-08-19-jit-compile-vs-main/            does XLA make greta faster? linked
+                                           from greta#833
+2026-08-20-warmup-trace/                   the cost of tracing warmup draws;
+                                           linked from greta#834
+2026-08-22-optimiser-r-loop/               opt()'s cost per iteration from an R
+                                           loop; linked from greta#547 and
+                                           cited in R/optimiser_class.R
+2026-09-21-example-baseline/               the suite's examples and their cost;
+                                           cited in R/examples.R
+2026-09-21-tier-costs/                     what each suite tier costs; cited in
+                                           R/tiers.R
+2026-09-28-batch-means-t-threshold/        the t threshold for greta's
+                                           bivariate normal test (greta#845)
+2026-09-28-chol2symm-tolerance-i842/       cited in greta's test_functions.R
+2026-09-29-hessian-timing-i546/            cited in greta's R/utils.R
+2026-09-30-trace-census-i546/              cited in greta's R/dag_class.R
+2026-10-01-iterations-and-efficiency-i318/ comparing at equal iterations;
+                                           cited in AGENTS.md
 ```
 
 ## Running one
@@ -296,13 +333,6 @@ Rscript --quiet --vanilla 2026-08-20-warmup-trace/02-report.R
 
 Run from the repository root: the scripts use `here()`, so they do not depend on
 the working directory.
-
-The two runs before `2026-08-19` predate this layout and keep a single `run.R`
-that both measures and writes its own `results.md`. They are left alone rather
-than converted, for the same reason a run directory is never edited: their git
-SHAs and Python stacks were resolved when the write-up was generated and are not
-stored in `results.rds`, so regenerating those files would record commits that
-were never measured.
 
 `GRETA_REPO` sets where the greta checkout lives, defaulting to
 `~/github/greta-dev/greta`. Runs that compare branches need those branches
