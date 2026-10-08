@@ -1,0 +1,406 @@
+---
+title: "greta#855 (tf-warmup-i547): TFP's loops, tried and not adopted"
+description: "TensorFlow Probability's sample_chain() and minimize() timed against greta's own sampling loop and opt(), on the PR's branch and two models. Once traced, sample_chain() takes as long as greta's loop, and minimize() takes longer than opt(), so the PR keeps greta's own loops."
+date: 2026-10-07
+bibliography: ../../references.bib
+---
+
+```{r}
+#| label: setup
+#| code-summary: "Setup"
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(tidyr)
+  library(ggplot2)
+  library(bench)
+  library(here)
+})
+
+post_path <- "posts/2026-10-07-tfp-alternatives-i547"
+
+# each `# ---- label ----` section of the scripts, shown below by its label
+knitr::read_chunk(here(post_path, "benchmark.R"))
+knitr::read_chunk(here(post_path, "run.R"))
+
+# links to the scripts on GitHub, at the commit being rendered when GitHub
+# Actions renders the site
+github_ref <- Sys.getenv("GITHUB_SHA", "main")
+github_file_url <- function(file) {
+  paste0(
+    "https://github.com/greta-dev/greta.benchmarks/blob/",
+    github_ref,
+    "/",
+    post_path,
+    "/",
+    file
+  )
+}
+# Quarto escapes the markdown in an inline `{r}` result unless it is wrapped
+# in I(), so both link helpers return I()
+file_link <- function(file) {
+  I(paste0("[`", file, "`](", github_file_url(file), ")"))
+}
+
+# a link to the lines of a script's `# ---- label ----` section
+section_link <- function(file, label) {
+  lines <- readLines(here(post_path, file))
+  headings <- grep("^# ---- .+ ----$", lines)
+  start <- headings[lines[headings] == paste("# ----", label, "----")]
+  end <- c(headings, length(lines) + 1)[match(start, headings) + 1] - 1
+  while (end > start && !nzchar(trimws(lines[end]))) {
+    end <- end - 1
+  }
+  I(paste0(
+    "[`", label, "`](", github_file_url(file), "#L", start, "-L", end, ")"
+  ))
+}
+
+theme_set(theme_bw(base_size = 13))
+
+sessions <- list.files(
+  here(post_path, "results"),
+  pattern = "^session-[0-9]+[.]rds$",
+  full.names = TRUE
+) |>
+  lapply(readRDS)
+n_sessions <- length(sessions)
+results <- lapply(sessions, \(session_file) session_file$results$branch)
+bench_settings <- results[[1]]$bench_settings
+provenance <- results[[1]]$provenance
+python_version <- sub(
+  " .*",
+  "",
+  results[[1]]$session_info$python$version_string
+)
+model_levels <- names(results[[1]]$sampling)
+
+loop_levels <- c("greta", "tfp")
+loop_colours <- c(greta = "#009E73", tfp = "#E69F00")
+
+# a loop's first timed call on a model, apart from the calls after it
+label_calls <- function(call) {
+  factor(
+    ifelse(call == 1, "first call", "later calls"),
+    levels = c("first call", "later calls")
+  )
+}
+
+# one row per timed call: bench keeps every call's time in the `time` column
+every_call <- function(marks, ...) {
+  marks |>
+    as_tibble() |>
+    mutate(loop = factor(as.character(expression), levels = loop_levels)) |>
+    select(loop, ..., time) |>
+    mutate(call = lapply(time, seq_along)) |>
+    unnest(c(time, call)) |>
+    mutate(seconds = as.numeric(time), calls = label_calls(call), .keep = "unused")
+}
+
+# every timed call, from every session and model
+sampling_calls <- lapply(seq_along(results), function(i) {
+  lapply(model_levels, function(model_name) {
+    every_call(results[[i]]$sampling[[model_name]]$marks) |>
+      mutate(session = sessions[[i]]$session, model = model_name)
+  }) |>
+    bind_rows()
+}) |>
+  bind_rows() |>
+  mutate(model = factor(model, levels = model_levels))
+
+opt_calls <- lapply(seq_along(results), function(i) {
+  lapply(model_levels, function(model_name) {
+    every_call(results[[i]]$opt[[model_name]], max_iterations) |>
+      mutate(session = sessions[[i]]$session, model = model_name)
+  }) |>
+    bind_rows()
+}) |>
+  bind_rows() |>
+  mutate(
+    model = factor(model, levels = model_levels),
+    iterations = factor(paste(max_iterations, "iterations"))
+  )
+
+# each loop's median call, and how many times as long TFP's loop takes as
+# greta's
+loop_medians <- function(calls, ...) {
+  calls |>
+    group_by(..., loop) |>
+    summarise(seconds = median(seconds), .groups = "drop") |>
+    pivot_wider(names_from = loop, values_from = seconds) |>
+    mutate(tfp_over_greta = tfp / greta)
+}
+sampling_medians <- loop_medians(sampling_calls, model, calls)
+sampling_ratios <- split(
+  sampling_medians$tfp_over_greta,
+  sampling_medians$calls
+)
+opt_medians <- loop_medians(opt_calls, model, max_iterations)
+
+# three significant figures each, where format() would pad a vector to the
+# decimal places of its smallest value
+format_number <- function(x) {
+  formatC(signif(x, 3), format = "fg", digits = 3, big.mark = ",")
+}
+
+# "a to b", or one number when the two round the same
+format_range <- function(x) {
+  ends <- format_number(range(x))
+  if (ends[1] == ends[2]) {
+    return(ends[1])
+  }
+  paste(ends, collapse = " to ")
+}
+
+# A raincloud for each loop: the density of its calls above, their box plot
+# in the middle, and every call as a dot below. The summaries are drawn first
+# and faint, so the dots sit on top.
+raincloud <- list(
+  ggdist::stat_halfeye(
+    aes(fill = loop),
+    width = 0.4,
+    justification = -0.3,
+    .width = 0,
+    point_colour = NA,
+    alpha = 0.3
+  ),
+  geom_boxplot(aes(fill = loop), width = 0.25, outlier.shape = NA, alpha = 0.3),
+  # a fixed dot size, so a call looks the same size in every panel
+  ggdist::stat_dots(
+    aes(fill = loop),
+    side = "bottom",
+    layout = "swarm",
+    justification = 1.3,
+    scale = 0.75,
+    binwidth = unit(2.6, "mm"),
+    overflow = "compress",
+    colour = NA,
+    alpha = 0.6
+  ),
+  scale_colour_manual(values = loop_colours, guide = "none"),
+  scale_fill_manual(values = loop_colours, guide = "none")
+)
+raincloud_caption <- "Each dot is one call, from every session. Above the dots, the curve is the density of the calls and the box marks their median and quartiles."
+
+# a searchable table, its numbers rounded for reading
+dt_table <- function(data, digits = 3) {
+  table <- DT::datatable(
+    data,
+    rownames = FALSE,
+    filter = "top",
+    options = list(pageLength = 10, autoWidth = TRUE)
+  )
+  decimal_columns <- names(data)[vapply(data, is.double, logical(1))]
+  if (length(decimal_columns) == 0) {
+    return(table)
+  }
+  DT::formatRound(table, decimal_columns, digits)
+}
+```
+
+[greta#855](https://github.com/greta-dev/greta/pull/855) runs `mcmc()`'s sampling and `opt()`'s optimiser in loops of greta's own, inside TensorFlow; [the main post](../2026-10-07-tf-warmup-i547/) times them. This post times TensorFlow Probability's loops for the same jobs, `sample_chain()` and `minimize()`, against greta's, on the PR's branch and two models. Once traced, `sample_chain()` takes `{r} format_range(sampling_ratios[["later calls"]])` times as long as greta's loop, and `minimize()` takes `{r} format_range(opt_medians$tfp_over_greta)` times as long as `opt()`. Neither is faster, so the PR keeps greta's own loops.
+
+## How long does `sample_chain()` take?
+
+Each session ran `hmc()` on each model for `{r} bench_settings$sampling_iterations` iterations on `{r} bench_settings$chains` chains, `{r} bench_settings$sampling_calls` times through each loop, from the state one `mcmc()` call had tuned.
+
+```{r}
+#| label: plot-sampling
+#| fig-cap: !expr raincloud_caption
+#| fig-height: 7
+ggplot(sampling_calls, aes(x = seconds, y = loop, colour = loop)) +
+  raincloud +
+  scale_y_discrete(labels = c(greta = "greta's loop", tfp = "sample_chain()")) +
+  facet_wrap(vars(model, calls), ncol = 2, scales = "free_x") +
+  labs(x = "Seconds", y = NULL)
+```
+
+Timed by `benchmark.R`'s `{r} section_link("benchmark.R", "benchmark-sampling")` section, with the kernel from its `{r} section_link("benchmark.R", "tfp-leapfrog-kernel")` section.
+
+Once traced, `sample_chain()` takes `{r} format_range(sampling_ratios[["later calls"]])` times as long as greta's loop. Its first call, which traces it, takes `{r} format_range(sampling_ratios[["first call"]])` times as long as greta's first call, which reuses the trace of the `mcmc()` call that tuned the sampler.
+
+<details><summary>Table: median seconds of each loop's calls</summary>
+
+```{r}
+#| label: table-sampling
+dt_table(sampling_medians, digits = 3)
+```
+
+</details>
+
+## How long does `minimize()` take?
+
+Each session ran `opt()` with `adam()`, and `minimize()` with the same Keras optimiser, `{r} bench_settings$opt_calls` times each on each model at `{r} paste(bench_settings$opt_max_iterations, collapse = " and ")` iterations, building and tracing the loop afresh on every call, as `opt()` does.
+
+```{r}
+#| label: plot-opt
+#| fig-cap: !expr raincloud_caption
+#| fig-height: 7
+# what the extra iterations cost opt(): the difference between its median call
+# at the most and at the fewest iterations
+iteration_cost <- opt_medians |>
+  group_by(model) |>
+  summarise(
+    fewest = greta[which.min(max_iterations)],
+    extra = greta[which.max(max_iterations)] - fewest,
+    .groups = "drop"
+  )
+
+ggplot(opt_calls, aes(x = seconds, y = loop, colour = loop)) +
+  raincloud +
+  scale_y_discrete(labels = c(greta = "opt()", tfp = "minimize()")) +
+  facet_wrap(vars(model, iterations), ncol = 2, scales = "free_x") +
+  labs(x = "Seconds", y = NULL)
+```
+
+Timed by `benchmark.R`'s `{r} section_link("benchmark.R", "benchmark-opt")` section.
+
+`minimize()` takes `{r} format_range(opt_medians$tfp_over_greta)` times as long as `opt()`. Most of an `opt()` call is building and tracing its loop: on the two models, its median call takes `{r} format_range(iteration_cost$fewest)` seconds at `{r} min(bench_settings$opt_max_iterations)` iterations, and `{r} diff(range(bench_settings$opt_max_iterations))` more iterations add `{r} format_range(iteration_cost$extra)` seconds.
+
+<details><summary>Table: median seconds of each loop's calls</summary>
+
+```{r}
+#| label: table-opt
+dt_table(opt_medians, digits = 3)
+```
+
+</details>
+
+## Do both loops sample the same posterior?
+
+For each free parameter in each session, the difference between the two loops' posterior means, in units of its Monte Carlo standard error [@vehtari2021]: a z beyond about ±3 would say they sample different posteriors.
+
+```{r}
+#| label: plot-agreement
+#| fig-cap: "Each dot is one free parameter in one session. The grey band marks z between -3 and 3."
+#| fig-height: 4
+loop_means <- lapply(seq_along(results), function(i) {
+  lapply(model_levels, function(model_name) {
+    draws <- results[[i]]$sampling[[model_name]]$draws
+    lapply(loop_levels, function(loop) {
+      tibble(
+        session = sessions[[i]]$session,
+        model = model_name,
+        loop = loop,
+        posterior::summarise_draws(draws[[loop]], "mean", "mcse_mean")
+      )
+    }) |>
+      bind_rows()
+  }) |>
+    bind_rows()
+}) |>
+  bind_rows()
+
+agreement <- loop_means |>
+  pivot_wider(
+    id_cols = c(session, model, variable),
+    names_from = loop,
+    values_from = c(mean, mcse_mean)
+  ) |>
+  mutate(
+    model = factor(model, levels = model_levels),
+    # the draws are of the free state, whose columns have no names, so
+    # posterior names them ...1, ...2 and so on
+    variable = sub("^[.]+", "free parameter ", variable),
+    z = (mean_greta - mean_tfp) / sqrt(mcse_mean_greta^2 + mcse_mean_tfp^2)
+  )
+
+ggplot(agreement, aes(x = z, y = variable)) +
+  annotate("rect", xmin = -3, xmax = 3, ymin = -Inf, ymax = Inf, alpha = 0.15) +
+  geom_point(alpha = 0.6, size = 2) +
+  facet_wrap(vars(model), scales = "free_y") +
+  expand_limits(x = c(-4, 4)) +
+  labs(x = "z", y = NULL)
+```
+
+Drawn by `benchmark.R`'s `{r} section_link("benchmark.R", "benchmark-sampling")` section, in each loop's last call.
+
+The largest |z| of the `{r} nrow(agreement)` comparisons is `{r} format_number(max(abs(agreement$z)))`, so none says the loops sample different posteriors.
+
+<details><summary>Table: every comparison</summary>
+
+```{r}
+#| label: table-agreement
+dt_table(agreement, digits = 3)
+```
+
+</details>
+
+## How it was measured
+
+`{r} file_link("run.R")` ran `{r} file_link("benchmark.R")` top to bottom in `{r} n_sessions` fresh R sessions, with the settings in its `{r} section_link("benchmark.R", "benchmark-settings")` section. Each session ran one version of greta, the PR's branch at commit `5bdab31e`, which is not on GitHub, so pak installed it from a local worktree, as `{r} section_link("run.R", "run-versions")` says. Both loops of each pair ran in the same session, greta's calls before TFP's. The sessions ran on Python `{r} python_version`, TensorFlow `{r} provenance$tensorflow_version`, TensorFlow Probability `{r} provenance$tfp_version` and reticulate `{r} provenance$reticulate_version`, on `{r} provenance$machine` with `{r} provenance$cores` cores.
+
+```{r}
+#| label: run-script
+#| file: run.R
+#| eval: false
+#| code-summary: "run.R"
+```
+
+```{r}
+#| label: benchmark-script
+#| file: benchmark.R
+#| eval: false
+#| code-summary: "benchmark.R"
+```
+
+### The TFP loops
+
+Neither TFP loop fits greta as it stands, so each needed a subclass of a TFP class, written in R with `reticulate::PyClass()`:
+
+- `sample_chain()` steps one kernel, built before its loop, so `hmc()`'s number of leapfrog steps would be fixed for the whole call, where greta draws it afresh every iteration. TFP's `HamiltonianMonteCarlo` reads the number from its kernel results when built with `store_parameters_in_results = TRUE`, so a wrapper kernel, `RandomLeapfrog`, writes a fresh number there every step. Both loops start from the same state, with the same step sizes and range of leapfrog steps.
+- `minimize()` stops when a convergence criterion says so, and none of TFP's is greta's: stop once two successive objectives differ by at most `tolerance`. The `AbsoluteChange` criterion does that. The tolerance here is 0, so both loops run every iteration. `opt()` starts from small random values and `minimize()` from zero.
+
+```{r}
+#| label: tfp-leapfrog-kernel
+#| eval: false
+#| code-summary: "benchmark.R: tfp-leapfrog-kernel"
+```
+
+```{r}
+#| label: benchmark-opt
+#| eval: false
+#| code-summary: "benchmark.R: benchmark-opt"
+```
+
+### The models
+
+Two of greta's example models: `{r} section_link("benchmark.R", "model-linear")`, a linear regression of `attitude`'s ratings on complaints, and `{r} section_link("benchmark.R", "model-hierarchical-linear")`, which regresses `iris`'s sepal length on sepal width with an offset for each species.
+
+```{r}
+#| label: model-linear
+#| eval: false
+#| code-summary: "benchmark.R: model-linear"
+```
+
+```{r}
+#| label: model-hierarchical-linear
+#| eval: false
+#| code-summary: "benchmark.R: model-hierarchical-linear"
+```
+
+## Session details
+
+What the branch reported about itself in session 1, from `benchmark.R`'s `{r} section_link("benchmark.R", "benchmark-provenance")` section.
+
+<details><summary>`greta_sitrep()`</summary>
+
+```{r}
+#| label: sitrep
+writeLines(results[[1]]$greta_sitrep_report)
+```
+
+</details>
+
+<details><summary>`sessioninfo::session_info()`</summary>
+
+```{r}
+#| label: session-info
+# a saved session_info() prints as a plain list unless sessioninfo's print
+# method is registered, which loading its namespace does
+invisible(loadNamespace("sessioninfo"))
+results[[1]]$session_info
+```
+
+</details>
+
+## References

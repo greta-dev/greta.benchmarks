@@ -1,0 +1,567 @@
+---
+title: "greta#855 (tf-warmup-i547): call overhead in `mcmc()` and `opt()`"
+description: "Runtime per call of `mcmc()` and `opt()` on [greta#855](https://github.com/greta-dev/greta/pull/855) with and without its last two changes, which keep `opt()`'s traced loop and `mcmc()`'s chain state in TensorFlow between calls. Without them, a call to `opt()`, or to `mcmc()` with `one_by_one = TRUE`, takes several times as long."
+date: 2026-10-07
+---
+
+```{r}
+#| label: setup
+#| code-summary: "Setup"
+source(here::here("posts", "_helpers.R"))
+
+post_path <- "posts/2026-10-07-call-overhead-i547"
+file_link <- file_linker(post_path)
+section_link <- section_linker(post_path)
+# the models' sections of benchmark.R, shown below by their labels
+knitr::read_chunk(here(post_path, "benchmark.R"))
+
+sessions <- read_sessions(post_path)
+n_sessions <- length(sessions)
+# the second run, of mcmc() with verbose = FALSE alone
+sessions_one_call <- read_sessions(post_path, "results-one-call")
+one_call_settings <- sessions_one_call[[1]]$results[[1]]$one_call_settings
+
+# the names the results give the versions, and the names this page shows
+version_labels <- c(CRAN = "CRAN", earlier = "#855 before", branch = "#855")
+# pak installed earlier and branch from archives of their commits, which the
+# results record as local paths; run.R names the same commits on GitHub
+versions <- display_versions(
+  sessions[[1]]$versions,
+  labels = version_labels,
+  on_github = c(
+    earlier = "greta-dev/greta@11405935549722ecbf035a2712a007419e52af66",
+    branch = "greta-dev/greta@f30ab1469ef9eafab8bb2ff48be10860cd3fd9ab"
+  )
+)
+version_levels <- names(versions)
+colours <- version_colours(version_levels)
+bench_settings <- sessions[[1]]$results[[1]]$bench_settings
+
+# how the text names each version: #855 links to the PR, and #855 before to
+# its commit
+version_text <- c(
+  CRAN = "CRAN",
+  `#855 before` = paste0(
+    "[#855 before](",
+    commit_url(versions[["#855 before"]]),
+    ")"
+  ),
+  `#855` = paste0("[#855](", pr_url(855), ")")
+)
+version_ref <- function(version) I(version_text[[version]])
+
+# one row per session and version, holding that version's results
+runs <- lapply(sessions, function(session_file) {
+  tibble(
+    session = session_file$session,
+    version = factor(
+      unname(version_labels[names(session_file$results)]),
+      levels = version_levels
+    ),
+    results = unname(session_file$results)
+  )
+}) |>
+  bind_rows()
+
+model_levels <- names(runs$results[[1]]$mcmc)
+
+# opt() was also timed at fewer iterations, which this page leaves out
+opt_iterations <- max(bench_settings$opt_max_iterations)
+
+# what each figure has a row of panels for: mcmc()'s three ways of running,
+# named as benchmark.R names them, and opt()
+case_labels <- c(
+  one_by_one = "mcmc(), one_by_one = TRUE, no progress bar",
+  progress = "mcmc(), progress bar shown (verbose = TRUE)",
+  one_call = "mcmc(), no progress bar (verbose = FALSE)",
+  opt = paste0("opt(), adam(), max_iterations = ", opt_iterations)
+)
+mcmc_cases <- c("one_by_one", "progress", "one_call")
+
+# every timed call, in every session, version, model and case
+timed_calls <- lapply(seq_len(nrow(runs)), function(i) {
+  lapply(model_levels, function(model_name) {
+    mcmc_marks <- runs$results[[i]]$mcmc[[model_name]]
+    mcmc_calls <- lapply(mcmc_cases, function(mode) {
+      every_call(mcmc_marks[[mode]]) |> mutate(case = case_labels[[mode]])
+    })
+    opt_calls <- every_call(
+      runs$results[[i]]$opt[[model_name]],
+      max_iterations
+    ) |>
+      filter(max_iterations == opt_iterations) |>
+      select(-max_iterations) |>
+      mutate(case = case_labels[["opt"]])
+    bind_rows(mcmc_calls, opt_calls) |>
+      mutate(model = model_name)
+  }) |>
+    bind_rows() |>
+    mutate(session = runs$session[i], version = runs$version[i])
+}) |>
+  bind_rows() |>
+  mutate(
+    model = factor(model, levels = model_levels),
+    case = factor(case, levels = case_labels)
+  )
+
+# each version's median first call, and median call after the first, for each
+# case and model, and how many times as long #855 before and CRAN take as #855
+call_medians <- timed_calls |>
+  group_by(calls, case, model, version) |>
+  summarise(seconds = median(seconds), .groups = "drop") |>
+  pivot_wider(names_from = version, values_from = seconds) |>
+  mutate(
+    before_over_pr = `#855 before` / `#855`,
+    cran_over_pr = CRAN / `#855`
+  )
+
+# one column of call_medians, over the two models and the cases named
+ratios_of <- function(column, cases, which_calls = "calls after the first") {
+  rows <- call_medians$calls == which_calls &
+    call_medians$case %in% case_labels[cases]
+  call_medians[[column]][rows]
+}
+range_of <- function(column, cases, which_calls = "calls after the first") {
+  format_range(ratios_of(column, cases, which_calls))
+}
+
+# how #855 before and CRAN compare with #855, naming the slower
+before_vs_pr <- function(cases, which_calls = "calls after the first") {
+  compare_times(
+    ratios_of("before_over_pr", cases, which_calls),
+    version_text[["#855 before"]],
+    version_text[["#855"]]
+  )
+}
+cran_vs_pr <- function(cases, which_calls = "calls after the first") {
+  compare_times(
+    ratios_of("cran_over_pr", cases, which_calls),
+    version_text[["CRAN"]],
+    version_text[["#855"]]
+  )
+}
+
+# the sections of benchmark.R a reader runs to repeat the main run, in order
+main_run_sections <- c(
+  "benchmark-setup",
+  "benchmark-settings",
+  "model-linear",
+  "model-hierarchical-linear",
+  "benchmark-mcmc",
+  "benchmark-opt",
+  "bench-linear",
+  "bench-hierarchical-linear"
+)
+main_run_returns <- paste(
+  "list(mcmc = list(linear = linear_mcmc,",
+  "hierarchical_linear = hierarchical_linear_mcmc),",
+  "opt = list(linear = linear_opt, hierarchical_linear = hierarchical_linear_opt))"
+)
+
+# what each "Run it yourself" block shows: the main run, and the second run
+# of mcmc() with verbose = FALSE, on #855 before and #855 only
+main_run_code <- run_it_yourself(
+  post_path,
+  "benchmark.R",
+  main_run_sections,
+  versions,
+  main_run_returns
+)
+one_call_code <- run_it_yourself(
+  post_path,
+  "benchmark-one-call.R",
+  c("one-call-setup", "one-call-settings", "one-call-models", "one-call-mcmc"),
+  versions[c("#855 before", "#855")],
+  "list(linear = linear_one_call, hierarchical_linear = hierarchical_linear_one_call)"
+)
+```
+
+[greta#855](https://github.com/greta-dev/greta/pull/855)'s last two changes keep `opt()`'s traced loop on the model, and keep `mcmc()`'s chain state as tensors between the calls of a phase. This post, a companion to [the PR's main post](../2026-10-07-tf-warmup-i547/#the-pr-at-a-glance), times `{r} version_ref("#855")` against `{r} version_ref("#855 before")` those changes and against greta 0.6.0 from CRAN, calling each method several times on each model. Once the first call has traced the model, the median runtime per call compares as:
+
+- `opt()` with `adam()`:
+    - `{r} before_vs_pr("opt")`
+    - `{r} cran_vs_pr("opt")`
+- `mcmc()` with `one_by_one = TRUE`:
+    - `{r} before_vs_pr("one_by_one")`
+- `mcmc()` with the progress bar shown (`verbose = TRUE`, the default):
+    - `{r} before_vs_pr("progress")`
+- `mcmc()` with no progress bar (`verbose = FALSE`):
+    - `{r} version_ref("#855 before")` and `{r} version_ref("#855")` take the same time, as [measured again below](#verbose-false-measured-again)
+
+::: {.callout-note collapse="true"}
+## How it was tested
+
+**The versions.**
+
+- **CRAN**: greta `{r} sessions[[1]]$results$CRAN$provenance$greta_version`. For the same `warmup` and `n_samples` it runs twice the sampler iterations the other two do: it runs `thin + 1` iterations per draw, and [greta#850](https://github.com/greta-dev/greta/pull/850), which [#855](https://github.com/greta-dev/greta/pull/855) builds on, made that `thin`.
+- **`{r} version_ref("#855 before")`**: `{r} I(version_link(versions[["#855 before"]]))`. `opt()` traces its loop afresh on every call, and `mcmc()` turns the chain's state, its tuning and the phase's fixed inputs into tensors before every call to TensorFlow, and the state and tuning back into R after it.
+- **`{r} version_ref("#855")`**: `{r} I(version_link(versions[["#855"]]))`, the PR's commit with the two changes. `opt()` keeps its traced loop on the model and starts it afresh from the initial values on every call, and the chain's state and tuning stay as tensors from one call to the next, coming back to R when a phase ends, with the phase's fixed inputs made into tensors once. Before this ran, every seeded draw, tuned parameter and `opt()` result was checked to be identical on the two.
+
+**The models**, two of greta's examples. Normal and log-normal distributions are written with their mean and standard deviation, as greta's `normal()` and `lognormal()` take them; $\text{Cauchy}^{+}$ is a Cauchy truncated to positive values.
+
+- `linear`: each department's rating in `attitude` regressed on its number of complaints.
+
+  $$
+  \begin{aligned}
+  \text{rating}_i &\sim \text{Normal}(\mu_i, \sigma), \quad i = 1, \dots, 30 \\
+  \mu_i &= \alpha + \beta \, \text{complaints}_i \\
+  \alpha, \beta &\sim \text{Normal}(0, 10) \\
+  \sigma &\sim \text{Cauchy}^{+}(0, 3)
+  \end{aligned}
+  $$
+
+- `hierarchical_linear`: sepal length on sepal width in `iris`, with an offset for each species, $s[i]$ being flower $i$'s. Setosa's offset is zero and the other two share a scale, $\tau$.
+
+  $$
+  \begin{aligned}
+  \text{Sepal.Length}_i &\sim \text{Normal}(\mu_i, \sigma), \quad i = 1, \dots, 150 \\
+  \mu_i &= \alpha + \beta \, \text{Sepal.Width}_i + \gamma_{s[i]} \\
+  \gamma_1 &= 0, \qquad \gamma_2, \gamma_3 \sim \text{Normal}(0, \tau) \\
+  \tau &\sim \text{LogNormal}(0, 1) \\
+  \alpha, \beta &\sim \text{Normal}(0, 10) \\
+  \sigma &\sim \text{Cauchy}^{+}(0, 3)
+  \end{aligned}
+  $$
+
+```{r}
+#| label: model-linear
+#| eval: false
+#| code-summary: "benchmark.R: model-linear"
+```
+
+```{r}
+#| label: model-hierarchical-linear
+#| eval: false
+#| code-summary: "benchmark.R: model-hierarchical-linear"
+```
+
+**What was timed.** In each session, on each model, built afresh for each so that its first call traces:
+
+- `mcmc()` on `{r} bench_settings$chains` chains, `{r} bench_settings$mcmc_calls` times each way: with `one_by_one = TRUE` and no progress bar, `warmup` of `{r} bench_settings$one_by_one_warmup` and `n_samples` of `{r} bench_settings$one_by_one_n_samples`; and with the progress bar shown (`verbose = TRUE`, the default) and with no progress bar (`verbose = FALSE`), both with `warmup` of `{r} bench_settings$warmup` and `n_samples` of `{r} bench_settings$n_samples` (`benchmark.R`'s `{r} section_link("benchmark.R", "benchmark-mcmc")` section).
+- `opt()` with `adam()`, `{r} bench_settings$opt_calls` times with `max_iterations` of `{r} opt_iterations` (its `{r} section_link("benchmark.R", "benchmark-opt")` section). It was also timed with `max_iterations` of `{r} min(bench_settings$opt_max_iterations)`, which this page leaves out, as no one would run `opt()` for so few.
+- A second run timed `mcmc()` with `verbose = FALSE` alone, on `{r} version_ref("#855 before")` and `{r} version_ref("#855")`, `{r} one_call_settings$mcmc_calls` times on each model (`benchmark-one-call.R`'s `{r} section_link("benchmark-one-call.R", "one-call-mcmc")` section).
+
+**The sessions.** `{r} file_link("run.R")` installed each version as its `{r} section_link("run.R", "run-versions")` section says, and ran `{r} file_link("benchmark.R")` for each in a fresh R session of its own, in `{r} n_sessions` sessions, in a new random order each session (its `{r} section_link("run.R", "run-sessions")` section). `{r} file_link("run-one-call.R")` ran the second run in `{r} length(sessions_one_call)` sessions, each version running first in every other one. Every version ran on TensorFlow `{r} runs$results[[1]]$provenance$tensorflow_version`, TensorFlow Probability `{r} runs$results[[1]]$provenance$tfp_version` and reticulate `{r} runs$results[[1]]$provenance$reticulate_version`, on `{r} runs$results[[1]]$provenance$machine` with `{r} runs$results[[1]]$provenance$cores` cores.
+
+**The scripts in full.**
+
+```{r}
+#| label: run-script
+#| file: run.R
+#| eval: false
+#| code-summary: "run.R"
+```
+
+```{r}
+#| label: benchmark-script
+#| file: benchmark.R
+#| eval: false
+#| code-summary: "benchmark.R"
+```
+
+```{r}
+#| label: run-one-call-script
+#| file: run-one-call.R
+#| eval: false
+#| code-summary: "run-one-call.R"
+```
+
+```{r}
+#| label: benchmark-one-call-script
+#| file: benchmark-one-call.R
+#| eval: false
+#| code-summary: "benchmark-one-call.R"
+```
+
+:::
+
+## Runtime per call, once the model is traced {#summary}
+
+Each version called `mcmc()` `{r} bench_settings$mcmc_calls` times on each model, each way, and `opt()` `{r} bench_settings$opt_calls` times. The first call traces the model's TensorFlow functions and the calls after it reuse them, so this section compares the calls after the first; [the first call](#first-call) has its own section. Each row of panels is one of `mcmc()`'s three ways of running, or `opt()` with `adam()`.
+
+```{r}
+#| label: plot-calls-after-first
+#| fig-cap: !expr raincloud_caption
+#| fig-height: 18
+timed_calls |>
+  filter(calls == "calls after the first") |>
+  ggplot(aes(x = seconds, y = version, colour = version)) +
+  raincloud(colours) +
+  scale_x_log10() +
+  facet_wrap(vars(case, model), ncol = 2, scales = "free_x") +
+  labs(x = "Runtime per call (seconds, log scale)", y = NULL)
+```
+
+`{r} timed_by(section_link, "benchmark.R", c("benchmark-mcmc", "benchmark-opt", "bench-linear", "bench-hierarchical-linear"))`
+
+```{r}
+#| label: run-calls-after-first
+#| eval: false
+#| code-summary: "Run it yourself"
+#| code: !expr main_run_code
+```
+
+Over the two models:
+
+- `mcmc()` with `one_by_one = TRUE`:
+    - `{r} before_vs_pr("one_by_one")`
+    - `{r} cran_vs_pr("one_by_one")`
+- `mcmc()` with the progress bar shown (`verbose = TRUE`, the default):
+    - `{r} before_vs_pr("progress")`
+    - `{r} cran_vs_pr("progress")`
+- `mcmc()` with no progress bar (`verbose = FALSE`):
+    - `{r} before_vs_pr("one_call")`, a gap that came from the order the versions ran in, as [measured again below](#verbose-false-measured-again)
+    - `{r} cran_vs_pr("one_call")`
+- `opt()` with `adam()`, where a call on `{r} version_ref("#855")` takes a median of `{r} range_of("#855", "opt")` seconds:
+    - `{r} before_vs_pr("opt")`
+    - `{r} cran_vs_pr("opt")`
+
+With the same `warmup` and `n_samples`, CRAN runs twice the sampler iterations `{r} version_ref("#855")` does, so its `mcmc()` times include work the other two do not do.
+
+<details><summary>Table: median runtime per call in seconds, once the model is traced</summary>
+
+```{r}
+#| label: table-calls-after-first
+call_medians |>
+  filter(calls == "calls after the first") |>
+  select(-calls) |>
+  rename(`#855 before ÷ #855` = before_over_pr, `CRAN ÷ #855` = cran_over_pr) |>
+  dt_table(digits = 3)
+```
+
+</details>
+
+## Runtime of the first call, which traces the model {#first-call}
+
+The first call on a model traces its TensorFlow functions, so it takes longer than the calls after it; the panels are as above.
+
+```{r}
+#| label: plot-first-call
+#| fig-cap: !expr raincloud_caption
+#| fig-height: 18
+timed_calls |>
+  filter(calls == "first call") |>
+  ggplot(aes(x = seconds, y = version, colour = version)) +
+  raincloud(colours) +
+  scale_x_log10() +
+  facet_wrap(vars(case, model), ncol = 2, scales = "free_x") +
+  labs(x = "Runtime per call (seconds, log scale)", y = NULL)
+```
+
+`{r} timed_by(section_link, "benchmark.R", c("benchmark-mcmc", "benchmark-opt", "bench-linear", "bench-hierarchical-linear"))`
+
+```{r}
+#| label: run-first-call
+#| eval: false
+#| code-summary: "Run it yourself"
+#| code: !expr main_run_code
+```
+
+Over the two models:
+
+- `mcmc()` with `one_by_one = TRUE`, which returns to R every iteration from the first call on:
+    - `{r} before_vs_pr("one_by_one", "first call")`
+    - `{r} cran_vs_pr("one_by_one", "first call")`
+- `mcmc()` with the progress bar shown (`verbose = TRUE`, the default):
+    - `{r} before_vs_pr("progress", "first call")`
+    - `{r} cran_vs_pr("progress", "first call")`
+- `mcmc()` with no progress bar (`verbose = FALSE`):
+    - `{r} before_vs_pr("one_call", "first call")`
+    - `{r} cran_vs_pr("one_call", "first call")`
+- `opt()` with `adam()`:
+    - `{r} before_vs_pr("opt", "first call")`
+    - `{r} cran_vs_pr("opt", "first call")`
+
+<details><summary>Table: median runtime of the first call in seconds</summary>
+
+```{r}
+#| label: table-first-call
+call_medians |>
+  filter(calls == "first call") |>
+  select(-calls) |>
+  rename(`#855 before ÷ #855` = before_over_pr, `CRAN ÷ #855` = cran_over_pr) |>
+  dt_table(digits = 3)
+```
+
+</details>
+
+## Does the order the versions ran in explain the gap with `verbose = FALSE`? {#verbose-false-measured-again}
+
+```{r}
+#| label: one-call
+# the main run's median call after the first, per session and model, with
+# verbose = FALSE
+one_call_main_run <- timed_calls |>
+  filter(case == case_labels[["one_call"]], calls == "calls after the first") |>
+  group_by(model, session, version) |>
+  summarise(seconds = median(seconds), .groups = "drop") |>
+  pivot_wider(names_from = version, values_from = seconds) |>
+  mutate(before_over_pr = `#855 before` / `#855`)
+pr_ran_first <- sum(vapply(
+  sessions,
+  \(session_file) version_labels[[session_file$order[1]]] == "#855",
+  logical(1)
+))
+
+# every call after the first, in every session of the second run
+one_call_calls <- lapply(sessions_one_call, function(session_file) {
+  lapply(names(session_file$results), function(version) {
+    marks <- session_file$results[[version]]$mcmc
+    lapply(names(marks), function(model) {
+      seconds <- as.numeric(marks[[model]]$time[[1]])
+      tibble(
+        session = session_file$session,
+        went_first = paste(
+          version_labels[[session_file$order[1]]],
+          "ran first"
+        ),
+        version = factor(version_labels[[version]], levels = version_levels),
+        model = factor(model, levels = model_levels),
+        call = seq_along(seconds),
+        seconds = seconds
+      )
+    }) |>
+      bind_rows()
+  }) |>
+    bind_rows()
+}) |>
+  bind_rows() |>
+  filter(call > 1) |>
+  mutate(
+    went_first = factor(
+      went_first,
+      levels = paste(version_labels[c("earlier", "branch")], "ran first")
+    )
+  )
+
+# how many times as long #855 before takes as #855, per session and model
+one_call_by_session <- one_call_calls |>
+  group_by(model, went_first, session, version) |>
+  summarise(seconds = median(seconds), .groups = "drop") |>
+  pivot_wider(names_from = version, values_from = seconds) |>
+  mutate(before_over_pr = `#855 before` / `#855`)
+order_compared <- function(first) {
+  compare_times(
+    one_call_by_session$before_over_pr[one_call_by_session$went_first == first],
+    version_text[["#855 before"]],
+    version_text[["#855"]]
+  )
+}
+
+# and over every session, to three decimal places, as the two are so close
+one_call_overall <- one_call_calls |>
+  group_by(model, version) |>
+  summarise(seconds = median(seconds), .groups = "drop") |>
+  pivot_wider(names_from = version, values_from = seconds) |>
+  mutate(before_over_pr = `#855 before` / `#855`)
+overall_ratio <- setNames(
+  formatC(one_call_overall$before_over_pr, format = "f", digits = 3),
+  one_call_overall$model
+)
+```
+
+With `verbose = FALSE`, `mcmc()` calls TensorFlow once per phase, so `{r} version_ref("#855")` makes about as many conversions as `{r} version_ref("#855 before")`, yet in the main run `{r} version_ref("#855")`'s median runtime per call, once the model was traced, was the longer in `{r} sum(one_call_main_run$before_over_pr < 1)` of `{r} nrow(one_call_main_run)` sessions and models. `{r} version_ref("#855")` had also run first in `{r} pr_ran_first` of the `{r} n_sessions` sessions, so this case was timed again on its own, with each version running first in every other session.
+
+```{r}
+#| label: plot-one-call
+#| fig-cap: !expr raincloud_caption
+#| fig-height: 8
+ggplot(one_call_calls, aes(x = seconds, y = version, colour = version)) +
+  raincloud(colours) +
+  facet_wrap(vars(model, went_first), ncol = 2, scales = "free_x") +
+  labs(x = "Runtime per call (seconds)", y = NULL)
+```
+
+`{r} timed_by(section_link, "benchmark-one-call.R", "one-call-mcmc")` The order is set by `run-one-call.R`'s `{r} section_link("run-one-call.R", "one-call-sessions")` section.
+
+```{r}
+#| label: run-one-call
+#| eval: false
+#| code-summary: "Run it yourself"
+#| code: !expr one_call_code
+```
+
+The version that ran first tended to be the slower:
+
+- per session and model, when `{r} version_ref("#855 before")` ran first:
+    - `{r} order_compared("#855 before ran first")`
+- per session and model, when `{r} version_ref("#855")` ran first:
+    - `{r} order_compared("#855 ran first")`
+- over every session, to three decimal places:
+    - on `linear`, `{r} version_ref("#855 before")` takes `{r} overall_ratio[["linear"]]` times as long as `{r} version_ref("#855")`
+    - on `hierarchical_linear`, `{r} version_ref("#855 before")` takes `{r} overall_ratio[["hierarchical_linear"]]` times as long as `{r} version_ref("#855")`
+
+So the two take the same time, and the gap in the main run came from the order, which counted against `{r} version_ref("#855")` in its other comparisons too.
+
+<details><summary>Table: median runtime per call in seconds once the model is traced, per session</summary>
+
+```{r}
+#| label: table-one-call
+one_call_by_session |>
+  rename(`#855 before ÷ #855` = before_over_pr) |>
+  dt_table(digits = 3)
+```
+
+</details>
+
+## Session details
+
+What each version reported about itself in session 1, from `benchmark.R`'s `{r} section_link("benchmark.R", "benchmark-provenance")` section:
+
+```{r}
+#| label: versions
+runs |>
+  filter(session == sessions[[1]]$session) |>
+  mutate(provenance = lapply(results, \(result) result$provenance)) |>
+  select(version, provenance) |>
+  unnest(provenance) |>
+  arrange(version) |>
+  mutate(
+    `installed from` = version_link(versions[as.character(version)]),
+    version = version_text[as.character(version)],
+    .after = version
+  ) |>
+  rename(
+    greta = greta_version,
+    R = r_version,
+    TensorFlow = tensorflow_version,
+    `TensorFlow Probability` = tfp_version,
+    reticulate = reticulate_version
+  ) |>
+  knitr::kable()
+```
+
+```{r}
+#| label: session-info-of
+first_session <- runs |> filter(session == sessions[[1]]$session)
+session_info_of <- function(version) {
+  first_session$results[[match(version, first_session$version)]]$session_info
+}
+```
+
+<details><summary>`sessioninfo::session_info()` for CRAN</summary>
+
+```{r}
+#| label: session-info-cran
+session_info_of("CRAN")
+```
+
+</details>
+
+<details><summary>`sessioninfo::session_info()` for #855 before</summary>
+
+```{r}
+#| label: session-info-before
+session_info_of("#855 before")
+```
+
+</details>
+
+<details><summary>`sessioninfo::session_info()` for #855</summary>
+
+```{r}
+#| label: session-info-pr
+session_info_of("#855")
+```
+
+</details>

@@ -1,20 +1,20 @@
 ---
-title: "Retracing on CRAN, main and greta#843"
-description: "Building models, opt(), opt(hessian = TRUE) and mcmc() on greta 0.6.0, main and greta#843: how long each takes, how many times each traces its TensorFlow functions, and the posteriors mcmc() returns."
+title: "greta#843 (faster-hessians-i546): retracing and hessians"
+description: "Building models, opt(), opt(hessian = TRUE) and mcmc() on greta 0.6.0 from CRAN, on main and on greta#843. greta#843 traces each model's TensorFlow functions fewer times, and opt(hessian = TRUE) is much faster on it."
 date: 2026-10-05
 bibliography: ../../references.bib
 ---
 
-[greta#843](https://github.com/greta-dev/greta/pull/843) traces greta's log-density and trace-values functions once per model, whatever the batch size, and takes all of `opt(hessian = TRUE)`'s hessians in one graph build. This post compares it with the version on CRAN and with main.
-
 ```{r}
 #| label: setup
-#| message: false
-library(dplyr)
-library(tidyr)
-library(ggplot2)
-library(bench)
-library(here)
+#| code-summary: "Setup"
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(tidyr)
+  library(ggplot2)
+  library(bench)
+  library(here)
+})
 
 post_path <- "posts/2026-10-05-retracing-i546"
 
@@ -36,7 +36,7 @@ github_file_url <- function(file) {
   )
 }
 # Quarto escapes the markdown in an inline `{r}` result unless it is wrapped
-# in I(), so both link helpers return I()
+# in I(), so the link helpers return I()
 file_link <- function(file) {
   I(paste0("[`", file, "`](", github_file_url(file), ")"))
 }
@@ -55,7 +55,25 @@ section_link <- function(file, label) {
   ))
 }
 
-# white panels, so the grey band in Agreement shows
+# "CRAN, main and #843"
+paste_and <- function(x) {
+  if (length(x) <= 1) {
+    return(x)
+  }
+  paste(paste(x[-length(x)], collapse = ", "), "and", x[length(x)])
+}
+
+# links to several sections of a script, as "a, b and c"
+section_links <- function(file, labels) {
+  links <- vapply(
+    labels,
+    \(label) as.character(section_link(file, label)),
+    character(1)
+  )
+  I(paste_and(links))
+}
+
+# white panels, so the grey band in the agreement plot shows
 theme_set(theme_bw())
 
 sessions <- list.files(
@@ -71,6 +89,8 @@ version_colours <- setNames(
   c("#E69F00", "#56B4E9", "#009E73")[seq_along(version_levels)],
   version_levels
 )
+# the version this post is about: every ratio is against it
+pr_version <- "#843"
 bench_settings <- sessions[[1]]$results[[1]]$bench_settings
 n_sessions <- length(sessions)
 
@@ -86,6 +106,8 @@ runs <- lapply(sessions, function(session_file) {
   bind_rows()
 
 model_levels <- names(runs$results[[1]]$build)
+# benchmark.R's section labels spell each model with hyphens
+model_labels <- gsub("_", "-", model_levels)
 
 # a part of the results that is a table or a value per run, stacked, with the
 # run it came from
@@ -161,6 +183,13 @@ bench_summary <- function(marks) {
   )
 }
 
+# each version's median call, from a table of every call
+version_medians <- function(calls) {
+  calls |>
+    group_by(version) |>
+    summarise(seconds = median(seconds))
+}
+
 # The first call on a model traces its TensorFlow functions; later calls on the
 # same model reuse them.
 label_calls <- function(call) {
@@ -179,9 +208,10 @@ label_calls <- function(call) {
 }
 
 # three significant figures each, where format() would pad a vector to the
-# decimal places of its smallest value
+# decimal places of its smallest value; formatC() pads each to a common width,
+# so the spaces are trimmed
 format_number <- function(x) {
-  formatC(signif(x, 3), format = "fg", digits = 3, big.mark = ",")
+  trimws(formatC(signif(x, 3), format = "fg", digits = 3, big.mark = ","))
 }
 
 # "CRAN 10.6, main 11.2, #843 0.643"
@@ -189,12 +219,19 @@ versions_text <- function(version, value) {
   paste(paste(version, format_number(value)), collapse = ", ")
 }
 
-# "CRAN, main and #843"
-paste_and <- function(x) {
-  if (length(x) <= 1) {
-    return(x)
-  }
-  paste(paste(x[-length(x)], collapse = ", "), "and", x[length(x)])
+# a version's value, from a table with one row per version
+value_of <- function(table, version_name, column = "seconds") {
+  table[[column]][table$version == version_name]
+}
+
+# how many times as long as #843 a version takes, from a table of medians
+times_as_long <- function(table, version_name) {
+  format_number(value_of(table, version_name) / value_of(table, pr_version))
+}
+
+# "once", "twice" or "3 times"
+times_word <- function(n) {
+  ifelse(n == 1, "once", ifelse(n == 2, "twice", paste(n, "times")))
 }
 
 version_scale <- scale_colour_manual(values = version_colours, guide = "none")
@@ -236,6 +273,7 @@ raincloud <- list(
   theme_bw(base_size = 13)
 )
 raincloud_caption <- "Each dot is one call, from every session. Above the dots, the curve is the density of the calls and the box marks their median and quartiles."
+session_caption <- "Each small dot is one session's second call. The large faint dot behind them is their mean."
 
 # a searchable table, its numbers rounded for reading
 dt_table <- function(data, digits = 3) {
@@ -261,431 +299,22 @@ parameter_count <- function(name) {
 draws_width <- function(name) {
   max(8, 1.6 * parameter_count(name))
 }
-```
 
-Two scripts made every result here. `{r} file_link("benchmark.R")` is what each version runs, in a fresh R session of its own, and `{r} file_link("run.R")` runs it for each version in each session. Each section below shows the part of a script it is about, read out of the script by its `# ---- label ----` heading and linked to those lines on GitHub, so the code shown is the code that ran. All the code on this page is folded: click a fold to open it. Both scripts in full:
-
-```{r}
-#| label: run-script
-#| file: run.R
-#| eval: false
-#| code-summary: "run.R"
-```
-
-```{r}
-#| label: benchmark-script
-#| file: benchmark.R
-#| eval: false
-#| code-summary: "benchmark.R"
-```
-
-## What was compared
-
-```{r}
-#| label: versions
-provenance |>
-  distinct(version, greta_version, greta_sha, tensorflow_version, tfp_version, r_version) |>
-  arrange(version) |>
-  mutate(
-    installed_from = versions[as.character(version)],
-    # pak records a CRAN install's version in place of a commit, so only a
-    # GitHub install gets a link to its commit
-    installed_from = ifelse(
-      grepl("^[0-9a-f]{40}$", greta_sha),
-      paste0(
-        "[",
-        sub("@.*", "", installed_from),
-        "@",
-        substr(greta_sha, 1, 8),
-        "](https://github.com/greta-dev/greta/commit/",
-        greta_sha,
-        ")"
-      ),
-      installed_from
-    )
-  ) |>
-  select(
-    version,
-    `installed from` = installed_from,
-    greta = greta_version,
-    TensorFlow = tensorflow_version,
-    TFP = tfp_version,
-    R = r_version
-  ) |>
-  knitr::kable()
-
-python_stacks <- provenance |>
-  distinct(version, tensorflow_version, tfp_version) |>
-  group_by(tensorflow_version, tfp_version) |>
+# the opening's numbers: each version's median opt(hessian = TRUE) call, and
+# how many times mcmc() traced each model's log density
+opening_hessian <- version_medians(every_call(hessian_marks))
+opening_traces <- mcmc_tracing |>
+  group_by(version) |>
   summarise(
-    versions = paste_and(as.character(sort(version))),
-    .groups = "drop"
+    traces = paste(times_word(sort(unique(log_prob_traces))), collapse = " or ")
   )
-python_stack_text <- paste0(
-  python_stacks$versions,
-  " ran on TensorFlow ",
-  python_stacks$tensorflow_version,
-  " and TensorFlow Probability ",
-  python_stacks$tfp_version,
-  collapse = "; "
-)
 ```
 
-`{r} python_stack_text`. Every version's `greta_sitrep()` report and `sessioninfo::session_info()` are in [Session details](#session-details).
+[greta#843](https://github.com/greta-dev/greta/pull/843) traces each model's log-density and trace-values functions once, whatever the batch size, and takes all of `opt(hessian = TRUE)`'s hessians in one graph build. This post compares it with greta 0.6.0 on CRAN and with main. On a model with twenty hessians, an `opt(hessian = TRUE)` call takes a median of `{r} format_number(value_of(opening_hessian, pr_version))` seconds on #843; CRAN takes `{r} times_as_long(opening_hessian, "CRAN")` times as long, and main `{r} times_as_long(opening_hessian, "main")` times as long. In `mcmc()`, #843 traces each model's log density `{r} value_of(opening_traces, pr_version, "traces")`, where CRAN traces it `{r} value_of(opening_traces, "CRAN", "traces")` and main `{r} value_of(opening_traces, "main", "traces")`.
 
-The versions, pinned to commits, are in `run.R`'s `{r} section_link("run.R", "run-versions")` section:
+## How long does `opt(hessian = TRUE)` take? {#speed}
 
-```{r}
-#| label: run-versions
-#| eval: false
-#| code-summary: "run.R: run-versions"
-```
-
-Each version ran in `{r} n_sessions` sessions, on `{r} unique(provenance$machine)` with `{r} unique(provenance$cores)` cores. In each session, `run.R`'s `{r} section_link("run.R", "run-sessions")` section ran `benchmark.R` once per version, each in a fresh R session, with the versions in a new random order:
-
-```{r}
-#| label: run-sessions
-#| eval: false
-#| code-summary: "run.R: run-sessions"
-```
-
-<details><summary>Table: the order of each session</summary>
-
-```{r}
-#| label: table-order
-runs |>
-  select(session, position, version) |>
-  arrange(session, position) |>
-  dt_table()
-```
-
-</details>
-
-Each version's session ran `benchmark.R` from top to bottom, with the seed and settings in its `{r} section_link("benchmark.R", "benchmark-setup")` and `{r} section_link("benchmark.R", "benchmark-settings")` sections:
-
-```{r}
-#| label: benchmark-setup
-#| eval: false
-#| code-summary: "benchmark.R: benchmark-setup"
-```
-
-```{r}
-#| label: benchmark-settings
-#| eval: false
-#| code-summary: "benchmark.R: benchmark-settings"
-```
-
-## The models
-
-Each model is from greta's `inst/examples/`, and is defined in maths and by its section of `benchmark.R`. Normal and log-normal distributions are written with their mean and standard deviation, as greta's `normal()` and `lognormal()` take them; $\text{Cauchy}^{+}$ is a Cauchy truncated to positive values. Defining a model's function needs no greta, so these sections are run here, which lets the timing sections below print each model.
-
-::: panel-tabset
-
-### linear
-
-A regression of each department's rating in `attitude` on its number of complaints. `{r} parameter_count("linear")` parameters. Its section is `{r} section_link("benchmark.R", "model-linear")`.
-
-$$
-\begin{aligned}
-\text{rating}_i &\sim \text{Normal}(\mu_i, \sigma), \quad i = 1, \dots, 30 \\
-\mu_i &= \alpha + \beta \, \text{complaints}_i \\
-\alpha, \beta &\sim \text{Normal}(0, 10) \\
-\sigma &\sim \text{Cauchy}^{+}(0, 3)
-\end{aligned}
-$$
-
-```{r}
-#| label: model-linear
-#| code-summary: "benchmark.R: model-linear"
-```
-
-### multiple_linear
-
-The same rating on all six of `attitude`'s other columns, $X$, through a matrix multiply. `{r} parameter_count("multiple_linear")` parameters. Its section is `{r} section_link("benchmark.R", "model-multiple-linear")`.
-
-$$
-\begin{aligned}
-\text{rating}_i &\sim \text{Normal}(\mu_i, \sigma), \quad i = 1, \dots, 30 \\
-\mu_i &= \alpha + \sum_{j = 1}^{6} X_{ij} \, \beta_j \\
-\alpha, \beta_j &\sim \text{Normal}(0, 10) \\
-\sigma &\sim \text{Cauchy}^{+}(0, 3)
-\end{aligned}
-$$
-
-```{r}
-#| label: model-multiple-linear
-#| code-summary: "benchmark.R: model-multiple-linear"
-```
-
-### hierarchical_linear
-
-Sepal length on sepal width in `iris`, with an offset for each species, $s[i]$ being flower $i$'s. Setosa's offset is zero and the other two share a scale, $\tau$. `{r} parameter_count("hierarchical_linear")` parameters. Its section is `{r} section_link("benchmark.R", "model-hierarchical-linear")`.
-
-$$
-\begin{aligned}
-\text{Sepal.Length}_i &\sim \text{Normal}(\mu_i, \sigma), \quad i = 1, \dots, 150 \\
-\mu_i &= \alpha + \beta \, \text{Sepal.Width}_i + \gamma_{s[i]} \\
-\gamma_1 &= 0, \qquad \gamma_2, \gamma_3 \sim \text{Normal}(0, \tau) \\
-\tau &\sim \text{LogNormal}(0, 1) \\
-\alpha, \beta &\sim \text{Normal}(0, 10) \\
-\sigma &\sim \text{Cauchy}^{+}(0, 3)
-\end{aligned}
-$$
-
-```{r}
-#| label: model-hierarchical-linear
-#| code-summary: "benchmark.R: model-hierarchical-linear"
-```
-
-### eight_schools
-
-The effect of coaching in eight schools, $y_j$, each measured with a known standard error, $\sigma_j$. The scale of the school effects, $\sigma_\eta$, is itself a parameter, which makes the posterior a funnel. `{r} parameter_count("eight_schools")` parameters. Its section is `{r} section_link("benchmark.R", "model-eight-schools")`.
-
-$$
-\begin{aligned}
-y_j &\sim \text{Normal}(\theta_j, \sigma_j), \quad j = 1, \dots, 8 \\
-\theta_j &= \mu + \xi \, \eta_j \\
-\eta_j &\sim \text{Normal}(0, \sigma_\eta) \\
-\sigma_\eta &\sim \text{InverseGamma}(1, 1) \\
-\mu &\sim \text{Normal}(0, 100) \\
-\xi &\sim \text{Normal}(0, 5)
-\end{aligned}
-$$
-
-```{r}
-#| label: model-eight-schools
-#| code-summary: "benchmark.R: model-eight-schools"
-```
-
-### hessian model
-
-The model greta#546 reported, used only for `opt(hessian = TRUE)`: twenty observations $y_k$, simulated, each with its own mean $b_k$, so `opt(hessian = TRUE)` takes twenty hessians. greta's `variable()` gives $b_k$ a flat prior, so it has no distribution line. Its section is `{r} section_link("benchmark.R", "model-hessian")`.
-
-$$
-y_k \sim \text{Normal}(b_k, 1), \quad k = 1, \dots, 20
-$$
-
-```{r}
-#| label: model-hessian
-#| code-summary: "benchmark.R: model-hessian"
-```
-
-:::
-
-## Sampler iterations per kept draw
-
-The same `mcmc()` arguments are the same work only if each version's sampler runs the same number of iterations for each draw it keeps. `benchmark.R` measures this in its `{r} section_link("benchmark.R", "benchmark-sampler-iterations")` section:
-
-```{r}
-#| label: benchmark-sampler-iterations
-#| eval: false
-#| code-summary: "benchmark.R: benchmark-sampler-iterations"
-```
-
-```{r}
-#| label: sampler-iterations
-sampler_iterations_values <- sampler_iterations_per_draw |>
-  group_by(version) |>
-  summarise(values = paste(sort(unique(value)), collapse = " or "))
-```
-
-Sampler iterations per kept draw, in every session: `{r} paste(sampler_iterations_values$version, sampler_iterations_values$values, collapse = ", ")`.
-
-<details><summary>Table: every session</summary>
-
-```{r}
-#| label: table-sampler-iterations
-sampler_iterations_per_draw |>
-  select(session, version, sampler_iterations_per_draw = value) |>
-  dt_table()
-```
-
-</details>
-
-## Speed
-
-Every call below is timed with {bench}'s `mark()`, which keeps each call's time in its result's `time` column. `benchmark.R` saves each result as `mark()` made it, so `summary()` and `autoplot()` work on them, and each table below is bench's `summary()` of every mark, with the mean and longest of its calls added. The first `opt()`, `opt(hessian = TRUE)` or `mcmc()` call on a new model traces the model's TensorFlow functions; later calls on the same model reuse them. So the plots split the first call from the later ones.
-
-Each timing section starts by printing the model it times. This page runs only that line, which prints the model's function below the folded code; knitr shows the lines it does not run here with `##` in front of them.
-
-::: panel-tabset
-
-### Building the model
-
-Calling each model's function: creating its greta arrays and calling `model()`. The timed code for each model is its `bench-build-` section of `benchmark.R`: `{r} section_link("benchmark.R", "bench-build-linear")`, `{r} section_link("benchmark.R", "bench-build-multiple-linear")`, `{r} section_link("benchmark.R", "bench-build-hierarchical-linear")` and `{r} section_link("benchmark.R", "bench-build-eight-schools")`.
-
-::: panel-tabset
-
-#### linear
-
-```{r}
-#| label: bench-build-linear
-#| eval: !expr 1
-#| code-summary: "benchmark.R: bench-build-linear"
-```
-
-#### multiple_linear
-
-```{r}
-#| label: bench-build-multiple-linear
-#| eval: !expr 1
-#| code-summary: "benchmark.R: bench-build-multiple-linear"
-```
-
-#### hierarchical_linear
-
-```{r}
-#| label: bench-build-hierarchical-linear
-#| eval: !expr 1
-#| code-summary: "benchmark.R: bench-build-hierarchical-linear"
-```
-
-#### eight_schools
-
-```{r}
-#| label: bench-build-eight-schools
-#| eval: !expr 1
-#| code-summary: "benchmark.R: bench-build-eight-schools"
-```
-
-:::
-
-```{r}
-#| label: build-summaries
-build <- every_call(build_marks)
-build_summary <- bench_summary(build_marks)
-
-build_medians <- build |>
-  group_by(version) |>
-  summarise(seconds = median(seconds))
-```
-
-Median seconds per call, over all models and sessions: `{r} versions_text(build_medians$version, build_medians$seconds)`.
-
-```{r}
-#| label: plot-build
-#| fig-cap: !expr raincloud_caption
-#| fig-height: 13
-ggplot(build, aes(x = seconds, y = version, colour = version)) +
-  raincloud +
-  facet_wrap(~model, ncol = 1, scales = "free_x") +
-  labs(x = "Seconds", y = NULL)
-```
-
-<details><summary>Table: bench's summary() of every mark</summary>
-
-```{r}
-#| label: table-build-summary
-dt_table(build_summary, digits = 4)
-```
-
-</details>
-
-<details><summary>Table: every call</summary>
-
-```{r}
-#| label: table-build
-dt_table(build, digits = 4)
-```
-
-</details>
-
-### opt()
-
-`opt()`, `{r} bench_settings$opt_calls` times on a model built for it. The timed code for each model is its `bench-opt-` section of `benchmark.R`, after the note in `{r} section_link("benchmark.R", "bench-opt")`: `{r} section_link("benchmark.R", "bench-opt-linear")`, `{r} section_link("benchmark.R", "bench-opt-multiple-linear")`, `{r} section_link("benchmark.R", "bench-opt-hierarchical-linear")` and `{r} section_link("benchmark.R", "bench-opt-eight-schools")`.
-
-```{r}
-#| label: bench-opt
-#| eval: false
-#| code-summary: "benchmark.R: bench-opt"
-```
-
-::: panel-tabset
-
-#### linear
-
-```{r}
-#| label: bench-opt-linear
-#| eval: !expr 1
-#| code-summary: "benchmark.R: bench-opt-linear"
-```
-
-#### multiple_linear
-
-```{r}
-#| label: bench-opt-multiple-linear
-#| eval: !expr 1
-#| code-summary: "benchmark.R: bench-opt-multiple-linear"
-```
-
-#### hierarchical_linear
-
-```{r}
-#| label: bench-opt-hierarchical-linear
-#| eval: !expr 1
-#| code-summary: "benchmark.R: bench-opt-hierarchical-linear"
-```
-
-#### eight_schools
-
-```{r}
-#| label: bench-opt-eight-schools
-#| eval: !expr 1
-#| code-summary: "benchmark.R: bench-opt-eight-schools"
-```
-
-:::
-
-```{r}
-#| label: opt-summaries
-opt_timings <- every_call(opt_marks) |>
-  mutate(calls = label_calls(call))
-opt_summary <- bench_summary(opt_marks)
-
-opt_medians <- opt_timings |>
-  group_by(version) |>
-  summarise(seconds = median(seconds))
-```
-
-Median seconds per call, over all models, calls and sessions: `{r} versions_text(opt_medians$version, opt_medians$seconds)`.
-
-```{r}
-#| label: plot-opt
-#| fig-cap: !expr raincloud_caption
-#| fig-height: 16
-ggplot(opt_timings, aes(x = seconds, y = version, colour = version)) +
-  raincloud +
-  facet_wrap(vars(model, calls), ncol = 2, scales = "free_x") +
-  labs(x = "Seconds", y = NULL)
-```
-
-<details><summary>Table: bench's summary() of every mark</summary>
-
-```{r}
-#| label: table-opt-summary
-dt_table(opt_summary, digits = 4)
-```
-
-</details>
-
-<details><summary>Table: every call</summary>
-
-```{r}
-#| label: table-opt
-dt_table(opt_timings, digits = 4)
-```
-
-</details>
-
-### opt(hessian = TRUE)
-
-`opt(hessian = TRUE)` on the hessian model, `{r} bench_settings$hessian_calls` times on the same model. The timed code is `benchmark.R`'s `{r} section_link("benchmark.R", "bench-hessian")` section:
-
-```{r}
-#| label: bench-hessian
-#| eval: !expr 1
-#| code-summary: "benchmark.R: bench-hessian"
-```
+Each session called `opt(hessian = TRUE)` `{r} bench_settings$hessian_calls` times on the [hessian model](#the-models), whose twenty scalar parameters each need a hessian. The first call traces the model's TensorFlow functions and later calls reuse them, so they are plotted apart.
 
 ```{r}
 #| label: hessian-summaries
@@ -695,12 +324,17 @@ hessian <- every_call(hessian_marks) |>
 hessian_summary <- bench_summary(hessian_marks) |>
   select(-model)
 
+# each version's median first call, and its median later call
 hessian_medians <- hessian |>
-  group_by(version) |>
-  summarise(seconds = median(seconds))
-```
+  group_by(version, first_call = call == 1) |>
+  summarise(seconds = median(seconds), .groups = "drop")
+hessian_first <- filter(hessian_medians, first_call)
+hessian_later <- filter(hessian_medians, !first_call)
 
-Median seconds per call, over all calls and sessions: `{r} versions_text(hessian_medians$version, hessian_medians$seconds)`.
+hessian_warning_counts <- hessian_retracing_warnings |>
+  group_by(version) |>
+  summarise(counts = paste(sort(unique(value)), collapse = " or "))
+```
 
 ```{r}
 #| label: plot-hessian
@@ -711,6 +345,10 @@ ggplot(hessian, aes(x = seconds, y = version, colour = version)) +
   facet_wrap(~calls, ncol = 1) +
   labs(x = "Seconds", y = NULL)
 ```
+
+Timed by `benchmark.R`'s `{r} section_link("benchmark.R", "bench-hessian")` section.
+
+The median first call takes `{r} versions_text(hessian_first$version, hessian_first$seconds)` seconds, and the median later call `{r} versions_text(hessian_later$version, hessian_later$seconds)`. So on later calls, CRAN takes `{r} times_as_long(hessian_later, "CRAN")` times as long as #843, and main `{r} times_as_long(hessian_later, "main")` times as long. TensorFlow's retracing warnings during each session's calls, counted in the same section: `{r} paste(hessian_warning_counts$version, hessian_warning_counts$counts, collapse = ", ")`.
 
 <details><summary>Table: bench's summary() of every mark</summary>
 
@@ -730,112 +368,9 @@ dt_table(hessian, digits = 4)
 
 </details>
 
-### mcmc()
+## How many times does `mcmc()` trace a model?
 
-`mcmc()` twice on each model: first on a new model, then on the same model again, which reuses the functions the first call traced. The timed code for each model is its `bench-mcmc-` section of `benchmark.R`, after the note in `{r} section_link("benchmark.R", "bench-mcmc")`: `{r} section_link("benchmark.R", "bench-mcmc-linear")`, `{r} section_link("benchmark.R", "bench-mcmc-multiple-linear")`, `{r} section_link("benchmark.R", "bench-mcmc-hierarchical-linear")` and `{r} section_link("benchmark.R", "bench-mcmc-eight-schools")`.
-
-```{r}
-#| label: bench-mcmc
-#| eval: false
-#| code-summary: "benchmark.R: bench-mcmc"
-```
-
-::: panel-tabset
-
-#### linear
-
-```{r}
-#| label: bench-mcmc-linear
-#| eval: !expr 1
-#| code-summary: "benchmark.R: bench-mcmc-linear"
-```
-
-#### multiple_linear
-
-```{r}
-#| label: bench-mcmc-multiple-linear
-#| eval: !expr 1
-#| code-summary: "benchmark.R: bench-mcmc-multiple-linear"
-```
-
-#### hierarchical_linear
-
-```{r}
-#| label: bench-mcmc-hierarchical-linear
-#| eval: !expr 1
-#| code-summary: "benchmark.R: bench-mcmc-hierarchical-linear"
-```
-
-#### eight_schools
-
-```{r}
-#| label: bench-mcmc-eight-schools
-#| eval: !expr 1
-#| code-summary: "benchmark.R: bench-mcmc-eight-schools"
-```
-
-:::
-
-```{r}
-#| label: mcmc-summaries
-mcmc_timings <- every_call(mcmc_marks) |>
-  mutate(calls = label_calls(call))
-mcmc_summary <- bench_summary(mcmc_marks)
-
-mcmc_medians <- mcmc_timings |>
-  group_by(version) |>
-  summarise(seconds = median(seconds))
-```
-
-Median seconds per call, over all models, calls and sessions: `{r} versions_text(mcmc_medians$version, mcmc_medians$seconds)`.
-
-```{r}
-#| label: plot-mcmc
-#| fig-cap: !expr raincloud_caption
-#| fig-height: 16
-ggplot(mcmc_timings, aes(x = seconds, y = version, colour = version)) +
-  raincloud +
-  facet_wrap(vars(model, calls), ncol = 2, scales = "free_x") +
-  labs(x = "Seconds", y = NULL)
-```
-
-<details><summary>Table: bench's summary() of every mark</summary>
-
-```{r}
-#| label: table-mcmc-summary
-dt_table(mcmc_summary, digits = 4)
-```
-
-</details>
-
-<details><summary>Table: every call</summary>
-
-```{r}
-#| label: table-mcmc
-dt_table(mcmc_timings, digits = 4)
-```
-
-</details>
-
-:::
-
-## Tracing
-
-After both `mcmc()` calls on each model, `benchmark.R`'s `{r} section_link("benchmark.R", "mcmc-tracing")` section asks each of the model's TensorFlow functions how many times it has been traced, and keeps the retracing warnings TensorFlow logged during the two calls:
-
-```{r}
-#| label: mcmc-tracing
-#| eval: false
-#| code-summary: "benchmark.R: mcmc-tracing"
-```
-
-It uses the helpers in `{r} section_link("benchmark.R", "benchmark-helpers")`:
-
-```{r}
-#| label: benchmark-helpers
-#| eval: false
-#| code-summary: "benchmark.R: benchmark-helpers"
-```
+After both of a model's `mcmc()` calls, each session asked each of the model's TensorFlow functions how many times it had been traced, and counted the retracing warnings TensorFlow logged during the two calls.
 
 ```{r}
 #| label: tracing-counts
@@ -859,6 +394,14 @@ counts_per_session <- tracing |>
   group_by(version, model, measure) |>
   summarise(distinct_counts = n_distinct(count), .groups = "drop")
 same_in_every_session <- all(counts_per_session$distinct_counts == 1)
+
+# how many times a version traced a function, over every model and session
+traced <- function(measure_name, version_name) {
+  counts <- tracing$count[
+    tracing$measure == measure_name & tracing$version == version_name
+  ]
+  paste(times_word(sort(unique(counts))), collapse = " or ")
+}
 ```
 
 `{r} if (same_in_every_session) paste0("Each count was the same in all ", n_sessions, " sessions, so each bar is that count.") else "The counts differ between sessions, so each dot is one session."`
@@ -866,27 +409,31 @@ same_in_every_session <- all(counts_per_session$distinct_counts == 1)
 ```{r}
 #| label: plot-tracing
 #| fig-height: 5
-#| warning: false
-tracing_plot <- ggplot(tracing, aes(x = count, y = model, fill = version, colour = version)) +
-  scale_fill_manual(values = version_colours) +
-  scale_colour_manual(values = version_colours) +
+tracing_plot <- ggplot(tracing, aes(x = count, y = model)) +
   scale_x_continuous(breaks = \(limits) unique(floor(pretty(limits)))) +
   facet_wrap(~measure, ncol = 2, scales = "free_x") +
   labs(x = "Count", y = NULL, fill = NULL, colour = NULL)
 
+# bars are filled and dots coloured, so each draws only the scale it uses
 if (same_in_every_session) {
   tracing_plot +
     geom_col(
+      aes(fill = version),
       data = distinct(tracing, version, model, measure, count),
       position = position_dodge(width = 0.8),
-      width = 0.75,
-      colour = NA
-    )
+      width = 0.75
+    ) +
+    scale_fill_manual(values = version_colours)
 } else {
   tracing_plot +
-    geom_point(position = position_dodge(width = 0.8))
+    geom_point(aes(colour = version), position = position_dodge(width = 0.8)) +
+    scale_colour_manual(values = version_colours)
 }
 ```
+
+Counted by `benchmark.R`'s `{r} section_link("benchmark.R", "mcmc-tracing")` section, with the helpers in its `{r} section_link("benchmark.R", "benchmark-helpers")` section.
+
+On #843, each model's log density is traced `{r} traced("log density traces", pr_version)` and its trace values `{r} traced("trace values traces", pr_version)`; on CRAN, `{r} traced("log density traces", "CRAN")` and `{r} traced("trace values traces", "CRAN")`; on main, `{r} traced("log density traces", "main")` and `{r} traced("trace values traces", "main")`. TensorFlow logged `{r} sum(mcmc_tracing$retracing_warnings)` retracing warnings during `mcmc()`, over every version, model and session.
 
 <details><summary>Table: every count</summary>
 
@@ -897,29 +444,56 @@ dt_table(tracing)
 
 </details>
 
+## How long does `mcmc()` take?
+
+Each session called `mcmc()` twice on each model, with `{r} bench_settings$warmup` warmup and `{r} bench_settings$n_samples` kept draws on each of `{r} bench_settings$chains` chains: first on a new model, which traces its TensorFlow functions, then on the same model again.
+
 ```{r}
-#| label: hessian-warnings
-hessian_warning_counts <- hessian_retracing_warnings |>
-  group_by(version) |>
-  summarise(counts = paste(sort(unique(value)), collapse = " or "))
+#| label: mcmc-summaries
+mcmc_timings <- every_call(mcmc_marks) |>
+  mutate(calls = label_calls(call))
+mcmc_summary <- bench_summary(mcmc_marks)
+mcmc_medians <- version_medians(mcmc_timings)
 ```
 
-Retracing warnings TensorFlow logged during each session's `{r} bench_settings$hessian_calls` calls of `opt(hessian = TRUE)`, counted in `{r} section_link("benchmark.R", "bench-hessian")`: `{r} paste(hessian_warning_counts$version, hessian_warning_counts$counts, collapse = ", ")`.
-
-## Efficiency
-
-The posterior checks from here on use every draw of every chain from each model's second `mcmc()` call, which `benchmark.R`'s `{r} section_link("benchmark.R", "mcmc-draws")` section keeps:
-
 ```{r}
-#| label: mcmc-draws
-#| eval: false
-#| code-summary: "benchmark.R: mcmc-draws"
+#| label: plot-mcmc
+#| fig-cap: !expr raincloud_caption
+#| fig-height: 16
+ggplot(mcmc_timings, aes(x = seconds, y = version, colour = version)) +
+  raincloud +
+  facet_wrap(vars(model, calls), ncol = 2, scales = "free_x") +
+  labs(x = "Seconds", y = NULL)
 ```
 
-Each model's posterior summary, in each session, from those draws [@vehtari2021]:
+Timed by `benchmark.R`'s `{r} section_links("benchmark.R", paste0("bench-mcmc-", model_labels))` sections.
+
+Over all models and both calls, the median call takes `{r} format_number(value_of(mcmc_medians, pr_version))` seconds on #843; CRAN takes `{r} times_as_long(mcmc_medians, "CRAN")` times as long, and main `{r} times_as_long(mcmc_medians, "main")` times as long.
+
+<details><summary>Table: bench's summary() of every mark</summary>
 
 ```{r}
-#| label: posterior-summaries
+#| label: table-mcmc-summary
+dt_table(mcmc_summary, digits = 4)
+```
+
+</details>
+
+<details><summary>Table: every call</summary>
+
+```{r}
+#| label: table-mcmc
+dt_table(mcmc_timings, digits = 4)
+```
+
+</details>
+
+## How many effective draws per second does `mcmc()` give?
+
+Efficiency is the bulk effective sample size (ESS) per second, the time-normalised ESS of @girolami2011, for the parameter with the smallest bulk ESS, as @hoffman2014 report, and for the median parameter [@vehtari2021]. It uses every draw of each model's second `mcmc()` call, and that call's seconds, warmup included.
+
+```{r}
+#| label: efficiency
 posterior <- lapply(seq_len(nrow(runs)), function(i) {
   draws <- runs$results[[i]]$mcmc_draws
   lapply(names(draws), function(model_name) {
@@ -942,12 +516,7 @@ posterior <- lapply(seq_len(nrow(runs)), function(i) {
 }) |>
   bind_rows() |>
   mutate(model = factor(model, levels = model_levels))
-```
 
-Efficiency is the bulk effective sample size (ESS) per second of sampling, the time-normalised ESS of @girolami2011, for the parameter with the smallest bulk ESS, as @hoffman2014 report, and for the median parameter. The draws are the second call's, so the seconds are the second call's, warmup included.
-
-```{r}
-#| label: efficiency
 second_calls <- mcmc_timings |>
   filter(call == 2) |>
   select(session, version, model, seconds)
@@ -973,40 +542,59 @@ efficiency_means <- efficiency |>
     .groups = "drop"
   )
 
-session_caption <- "Each small dot is one session's second call. The large faint dot behind them is their mean."
+# one row per session, model, version and measure, for one panel per measure
+efficiency_measures <- c(
+  smallest_ess_per_second = "Smallest bulk ESS per second",
+  median_ess_per_second = "Median bulk ESS per second"
+)
+longer_efficiency <- function(data) {
+  data |>
+    pivot_longer(
+      all_of(names(efficiency_measures)),
+      names_to = "measure",
+      values_to = "ess_per_second"
+    ) |>
+    mutate(
+      measure = factor(
+        efficiency_measures[measure],
+        levels = efficiency_measures
+      )
+    )
+}
+
+# #843's mean smallest bulk ESS per second over another version's, per model
+efficiency_ratios <- efficiency_means |>
+  group_by(model) |>
+  summarise(
+    of_cran = smallest_ess_per_second[version == pr_version] /
+      smallest_ess_per_second[version == "CRAN"],
+    of_main = smallest_ess_per_second[version == pr_version] /
+      smallest_ess_per_second[version == "main"]
+  )
 ```
-
-::: panel-tabset
-
-### Smallest bulk ESS per second
 
 ```{r}
-#| label: plot-efficiency-smallest
+#| label: plot-efficiency
 #| fig-cap: !expr session_caption
-#| fig-height: 6
-ggplot(efficiency, aes(x = smallest_ess_per_second, y = version, colour = version)) +
-  geom_point(data = efficiency_means, size = 5, alpha = 0.25) +
+#| fig-height: 10
+ggplot(
+  longer_efficiency(efficiency),
+  aes(x = ess_per_second, y = version, colour = version)
+) +
+  geom_point(
+    data = longer_efficiency(efficiency_means),
+    size = 5,
+    alpha = 0.25
+  ) +
   geom_point(position = jitter, size = 1.2) +
   version_scale +
-  facet_wrap(~model, ncol = 1, scales = "free_x") +
-  labs(x = "Smallest bulk ESS per second", y = NULL)
+  facet_wrap(vars(model, measure), ncol = 2, scales = "free_x") +
+  labs(x = "Bulk ESS per second", y = NULL)
 ```
 
-### Median bulk ESS per second
+The draws were kept by `benchmark.R`'s `{r} section_link("benchmark.R", "mcmc-draws")` section, and the calls timed by its `{r} section_links("benchmark.R", paste0("bench-mcmc-", model_labels))` sections.
 
-```{r}
-#| label: plot-efficiency-median
-#| fig-cap: !expr session_caption
-#| fig-height: 6
-ggplot(efficiency, aes(x = median_ess_per_second, y = version, colour = version)) +
-  geom_point(data = efficiency_means, size = 5, alpha = 0.25) +
-  geom_point(position = jitter, size = 1.2) +
-  version_scale +
-  facet_wrap(~model, ncol = 1, scales = "free_x") +
-  labs(x = "Median bulk ESS per second", y = NULL)
-```
-
-:::
+Depending on the model, #843 gives between `{r} format_number(min(efficiency_ratios$of_cran))` and `{r} format_number(max(efficiency_ratios$of_cran))` times CRAN's mean smallest bulk ESS per second, and between `{r} format_number(min(efficiency_ratios$of_main))` and `{r} format_number(max(efficiency_ratios$of_main))` times main's.
 
 <details><summary>Table: mean ESS per second</summary>
 
@@ -1026,79 +614,102 @@ dt_table(efficiency, digits = 1)
 
 </details>
 
-## Convergence
+## How long does `opt()` take?
 
-For each session's second `mcmc()` call, the largest rank-normalised split-$\hat{R}$ and the smallest bulk ESS over the model's parameters [@vehtari2021].
+Each session called `opt()` `{r} bench_settings$opt_calls` times on each model, built once for it. The first call traces the model's TensorFlow functions and later calls reuse them.
 
 ```{r}
-#| label: convergence
-convergence <- posterior |>
-  group_by(session, version, model) |>
-  summarise(
-    largest_rhat = max(rhat),
-    smallest_ess_bulk = min(ess_bulk),
-    .groups = "drop"
-  )
-
-convergence_means <- convergence |>
-  group_by(model, version) |>
-  summarise(
-    largest_rhat = mean(largest_rhat),
-    smallest_ess_bulk = mean(smallest_ess_bulk),
-    .groups = "drop"
-  )
+#| label: opt-summaries
+opt_timings <- every_call(opt_marks) |>
+  mutate(calls = label_calls(call))
+opt_summary <- bench_summary(opt_marks)
+opt_medians <- version_medians(opt_timings)
 ```
 
-::: panel-tabset
-
-### Largest R-hat
-
 ```{r}
-#| label: plot-rhat
-#| fig-cap: !expr session_caption
-#| fig-height: 6
-ggplot(convergence, aes(x = largest_rhat, y = version, colour = version)) +
-  geom_point(data = convergence_means, size = 5, alpha = 0.25) +
-  geom_point(position = jitter, size = 1.2) +
-  version_scale +
-  facet_wrap(~model, ncol = 1, scales = "free_x") +
-  labs(x = "Largest R-hat", y = NULL)
+#| label: plot-opt
+#| fig-cap: !expr raincloud_caption
+#| fig-height: 16
+ggplot(opt_timings, aes(x = seconds, y = version, colour = version)) +
+  raincloud +
+  facet_wrap(vars(model, calls), ncol = 2, scales = "free_x") +
+  labs(x = "Seconds", y = NULL)
 ```
 
-### Smallest bulk ESS
+Timed by `benchmark.R`'s `{r} section_links("benchmark.R", paste0("bench-opt-", model_labels))` sections.
+
+Over all models and calls, the median call takes `{r} format_number(value_of(opt_medians, pr_version))` seconds on #843; CRAN takes `{r} times_as_long(opt_medians, "CRAN")` times as long, and main `{r} times_as_long(opt_medians, "main")` times as long.
+
+<details><summary>Table: bench's summary() of every mark</summary>
 
 ```{r}
-#| label: plot-ess
-#| fig-cap: !expr session_caption
-#| fig-height: 6
-ggplot(convergence, aes(x = smallest_ess_bulk, y = version, colour = version)) +
-  geom_point(data = convergence_means, size = 5, alpha = 0.25) +
-  geom_point(position = jitter, size = 1.2) +
-  version_scale +
-  facet_wrap(~model, ncol = 1, scales = "free_x") +
-  labs(x = "Smallest bulk ESS", y = NULL)
-```
-
-:::
-
-<details><summary>Table: every session</summary>
-
-```{r}
-#| label: table-convergence
-dt_table(convergence)
+#| label: table-opt-summary
+dt_table(opt_summary, digits = 4)
 ```
 
 </details>
 
-## Agreement
+<details><summary>Table: every call</summary>
 
-Whether two versions estimate the same posterior means. The difference between two versions' means is divided by the Monte Carlo standard error (MCSE) of that difference, so a difference can be told apart from Monte Carlo noise [@vehtari2021; @magnusson2025]. For each parameter, each version's means and MCSEs are pooled over its sessions, and
+```{r}
+#| label: table-opt
+dt_table(opt_timings, digits = 4)
+```
+
+</details>
+
+## How long does building a model take?
+
+Each session built each model `{r} bench_settings$build_calls` times: creating its greta arrays and calling `model()`.
+
+```{r}
+#| label: build-summaries
+build <- every_call(build_marks)
+build_summary <- bench_summary(build_marks)
+build_medians <- version_medians(build)
+```
+
+```{r}
+#| label: plot-build
+#| fig-cap: !expr raincloud_caption
+#| fig-height: 13
+ggplot(build, aes(x = seconds, y = version, colour = version)) +
+  raincloud +
+  facet_wrap(~model, ncol = 1, scales = "free_x") +
+  labs(x = "Seconds", y = NULL)
+```
+
+Timed by `benchmark.R`'s `{r} section_links("benchmark.R", paste0("bench-build-", model_labels))` sections.
+
+Over all models, the median build takes `{r} format_number(value_of(build_medians, pr_version))` seconds on #843; CRAN takes `{r} times_as_long(build_medians, "CRAN")` times as long, and main `{r} times_as_long(build_medians, "main")` times as long.
+
+<details><summary>Table: bench's summary() of every mark</summary>
+
+```{r}
+#| label: table-build-summary
+dt_table(build_summary, digits = 4)
+```
+
+</details>
+
+<details><summary>Table: every call</summary>
+
+```{r}
+#| label: table-build
+dt_table(build, digits = 4)
+```
+
+</details>
+
+## Do the versions sample the same posterior?
+
+For each parameter, each version's posterior means and their Monte Carlo standard errors (MCSE) are pooled over its sessions, and two versions' pooled means are compared by
 
 $$
-z = \frac{\bar\theta_{\text{b}} - \bar\theta_{\text{a}}}{\sqrt{\text{se}^2_{\text{a}} + \text{se}^2_{\text{b}}}}.
+z = \frac{\bar\theta_{\text{b}} - \bar\theta_{\text{a}}}{\sqrt{\text{se}^2_{\text{a}} + \text{se}^2_{\text{b}}}},
 $$
 
-Each session has a seed of its own, so the sessions are independent, and a version's pooled standard error is $\sqrt{\sum \text{mcse}^2} / n$ over its $n$ sessions. If both versions sample the same posterior, each $z$ is close to a standard normal draw. Two versions that both respect `set.seed()` return the same draws from the same seed, and so a $z$ of zero.
+so a difference can be told apart from Monte Carlo noise [@vehtari2021; @magnusson2025]. Each session has a seed of its own, so the sessions are independent, and a version's pooled standard error is $\sqrt{\sum \text{mcse}^2} / n$ over its $n$ sessions. If both versions sample the same posterior, each $z$ is close to a standard normal draw; two versions that return the same draws from the same seed give a $z$ of zero.
 
 ```{r}
 #| label: agreement
@@ -1132,9 +743,33 @@ band <- qnorm(1 - 0.05 / (2 * parameters_compared))
 outside_band <- agreement |>
   group_by(comparison) |>
   summarise(outside = sum(abs(z) > band), largest_abs_z = max(abs(z)))
-```
 
-The grey band is $\pm$ `{r} format_number(band)`: if two versions sample the same posterior, all `{r} parameters_compared` parameters' $z$ fall inside it with probability at least 0.95, by a Bonferroni bound. Parameters outside it, per comparison: `{r} paste(outside_band$comparison, outside_band$outside, collapse = ", ")`.
+# whether two versions returned the same draws in every session
+draws_identical <- function(pair) {
+  all(vapply(
+    unique(runs$session),
+    function(session_number) {
+      first <- runs$results[[which(runs$session == session_number & runs$version == pair[1])]]
+      second <- runs$results[[which(runs$session == session_number & runs$version == pair[2])]]
+      identical(first$mcmc_draws, second$mcmc_draws)
+    },
+    logical(1)
+  ))
+}
+identical_pairs <- Filter(
+  draws_identical,
+  utils::combn(version_levels, 2, simplify = FALSE)
+)
+identical_text <- if (length(identical_pairs) == 0) {
+  "No two versions returned the same draws."
+} else {
+  paste0(
+    vapply(identical_pairs, \(pair) paste(pair, collapse = "'s and "), character(1)),
+    "'s draws are identical in every session.",
+    collapse = " "
+  )
+}
+```
 
 ```{r}
 #| label: plot-agreement
@@ -1154,6 +789,10 @@ ggplot(agreement, aes(x = z, y = model)) +
   facet_wrap(~comparison, ncol = 1) +
   labs(x = "z", y = NULL)
 ```
+
+From the draws of each model's second `mcmc()` call, kept by `benchmark.R`'s `{r} section_link("benchmark.R", "mcmc-draws")` section.
+
+The grey band is $\pm$ `{r} format_number(band)`, a Bonferroni bound over the `{r} parameters_compared` parameters. Parameters outside it, per comparison: `{r} paste(outside_band$comparison, outside_band$outside, collapse = ", ")`. `{r} identical_text`
 
 <details><summary>Table: largest |z| per comparison and model</summary>
 
@@ -1183,7 +822,7 @@ agreement |>
 
 </details>
 
-## Traceplots
+<details><summary>Traceplots</summary>
 
 Every draw of each chain from session 1's second `mcmc()` call on each model, numbered from the end of warmup, with a row of panels for each version.
 
@@ -1245,7 +884,6 @@ gg_trace <- function(name) {
 #| label: plot-trace-linear
 #| fig-height: 6
 #| fig-width: !expr draws_width("linear")
-#| column: page
 gg_trace("linear")
 ```
 
@@ -1255,7 +893,6 @@ gg_trace("linear")
 #| label: plot-trace-multiple-linear
 #| fig-height: 6
 #| fig-width: !expr draws_width("multiple_linear")
-#| column: page
 gg_trace("multiple_linear")
 ```
 
@@ -1265,7 +902,6 @@ gg_trace("multiple_linear")
 #| label: plot-trace-hierarchical-linear
 #| fig-height: 6
 #| fig-width: !expr draws_width("hierarchical_linear")
-#| column: page
 gg_trace("hierarchical_linear")
 ```
 
@@ -1275,15 +911,16 @@ gg_trace("hierarchical_linear")
 #| label: plot-trace-eight-schools
 #| fig-height: 6
 #| fig-width: !expr draws_width("eight_schools")
-#| column: page
 gg_trace("eight_schools")
 ```
 
 :::
 
-## Posterior densities
+</details>
 
-Every draw of every chain, from each session's second `mcmc()` call, pooled over sessions, with every version's density overlaid in one panel per parameter.
+<details><summary>Posterior densities</summary>
+
+Every draw of every chain, from each session's second `mcmc()` call, pooled over sessions, with every version's density overlaid in one panel per parameter. Where two versions' draws are identical, their lines lie on top of each other.
 
 ```{r}
 #| label: densities
@@ -1304,35 +941,7 @@ gg_densities <- function(name) {
 densities_height <- function(name) {
   1.5 + 2 * ceiling(parameter_count(name) / 4)
 }
-
-# whether two versions returned the same draws in every session
-draws_identical <- function(pair) {
-  all(vapply(
-    unique(runs$session),
-    function(session_number) {
-      first <- runs$results[[which(runs$session == session_number & runs$version == pair[1])]]
-      second <- runs$results[[which(runs$session == session_number & runs$version == pair[2])]]
-      identical(first$mcmc_draws, second$mcmc_draws)
-    },
-    logical(1)
-  ))
-}
-identical_pairs <- Filter(
-  draws_identical,
-  utils::combn(version_levels, 2, simplify = FALSE)
-)
-identical_text <- if (length(identical_pairs) == 0) {
-  ""
-} else {
-  paste0(
-    vapply(identical_pairs, \(pair) paste(pair, collapse = "'s and "), character(1)),
-    "'s draws are identical in every session, so their lines lie on top of each other.",
-    collapse = " "
-  )
-}
 ```
-
-`{r} identical_text`
 
 ::: panel-tabset
 
@@ -1370,21 +979,309 @@ gg_densities("eight_schools")
 
 :::
 
-## Session details
+</details>
 
-What each version reported about itself in session 1, from `benchmark.R`'s `{r} section_link("benchmark.R", "benchmark-provenance")` section:
+## Do the chains converge?
+
+For each session's second `mcmc()` call, the largest rank-normalised split-$\hat{R}$ and the smallest bulk ESS over each model's parameters [@vehtari2021].
 
 ```{r}
-#| label: benchmark-provenance
-#| eval: false
-#| code-summary: "benchmark.R: benchmark-provenance"
+#| label: convergence
+convergence <- posterior |>
+  group_by(session, version, model) |>
+  summarise(
+    largest_rhat = max(rhat),
+    smallest_ess_bulk = min(ess_bulk),
+    .groups = "drop"
+  )
+
+convergence_means <- convergence |>
+  group_by(model, version) |>
+  summarise(
+    largest_rhat = mean(largest_rhat),
+    smallest_ess_bulk = mean(smallest_ess_bulk),
+    .groups = "drop"
+  )
+
+# one row per session, model, version and measure, for one panel per measure
+convergence_measures <- c(
+  largest_rhat = "Largest R-hat",
+  smallest_ess_bulk = "Smallest bulk ESS"
+)
+longer_convergence <- function(data) {
+  data |>
+    pivot_longer(
+      all_of(names(convergence_measures)),
+      names_to = "measure",
+      values_to = "value"
+    ) |>
+    mutate(
+      measure = factor(
+        convergence_measures[measure],
+        levels = convergence_measures
+      )
+    )
+}
+
+# the model whose mean largest R-hat is largest, on any version
+rhat_by_model <- convergence_means |>
+  group_by(model) |>
+  summarise(largest_rhat = max(largest_rhat))
+worst_model <- as.character(rhat_by_model$model[which.max(rhat_by_model$largest_rhat)])
+worst_rhat <- filter(convergence_means, model == worst_model)
+other_models_rhat <- max(rhat_by_model$largest_rhat[rhat_by_model$model != worst_model])
 ```
+
+```{r}
+#| label: plot-convergence
+#| fig-cap: !expr session_caption
+#| fig-height: 10
+ggplot(
+  longer_convergence(convergence),
+  aes(x = value, y = version, colour = version)
+) +
+  geom_point(
+    data = longer_convergence(convergence_means),
+    size = 5,
+    alpha = 0.25
+  ) +
+  geom_point(position = jitter, size = 1.2) +
+  version_scale +
+  facet_wrap(vars(model, measure), ncol = 2, scales = "free_x") +
+  labs(x = NULL, y = NULL)
+```
+
+From the draws kept by `benchmark.R`'s `{r} section_link("benchmark.R", "mcmc-draws")` section.
+
+Averaged over sessions, the largest R-hat is highest on `{r} worst_model`: `{r} versions_text(worst_rhat$version, worst_rhat$largest_rhat)`. On every other model it is at most `{r} format_number(other_models_rhat)`, on every version.
+
+<details><summary>Table: every session</summary>
+
+```{r}
+#| label: table-convergence
+dt_table(convergence)
+```
+
+</details>
+
+## How it was measured
+
+```{r}
+#| label: versions
+provenance |>
+  distinct(version, greta_version, greta_sha, tensorflow_version, tfp_version, r_version) |>
+  arrange(version) |>
+  mutate(
+    installed_from = versions[as.character(version)],
+    # pak records a CRAN install's version in place of a commit, so only a
+    # GitHub install gets a link to its commit
+    installed_from = ifelse(
+      grepl("^[0-9a-f]{40}$", greta_sha),
+      paste0(
+        "[",
+        sub("@.*", "", installed_from),
+        "@",
+        substr(greta_sha, 1, 8),
+        "](https://github.com/greta-dev/greta/commit/",
+        greta_sha,
+        ")"
+      ),
+      installed_from
+    )
+  ) |>
+  select(
+    version,
+    `installed from` = installed_from,
+    greta = greta_version,
+    TensorFlow = tensorflow_version,
+    TFP = tfp_version,
+    R = r_version
+  ) |>
+  knitr::kable()
+
+python_stacks <- provenance |>
+  distinct(version, tensorflow_version, tfp_version) |>
+  group_by(tensorflow_version, tfp_version) |>
+  summarise(
+    versions = paste_and(as.character(sort(version))),
+    .groups = "drop"
+  )
+python_stack_text <- paste0(
+  python_stacks$versions,
+  " ran on TensorFlow ",
+  python_stacks$tensorflow_version,
+  " and TensorFlow Probability ",
+  python_stacks$tfp_version,
+  collapse = "; "
+)
+
+sampler_iterations_values <- sampler_iterations_per_draw |>
+  group_by(version) |>
+  summarise(values = paste(sort(unique(value)), collapse = " or "))
+```
+
+The versions are pinned to these commits in `run.R`'s `{r} section_link("run.R", "run-versions")` section. `{r} python_stack_text`.
+
+Each version ran in `{r} n_sessions` sessions, on `{r} unique(provenance$machine)` with `{r} unique(provenance$cores)` cores. In each session, `run.R`'s `{r} section_link("run.R", "run-sessions")` section ran `benchmark.R` once per version, each in a fresh R session, with the versions in a new random order. Each session has a seed of its own, set in `benchmark.R`'s `{r} section_link("benchmark.R", "benchmark-setup")` section, and the same settings, in its `{r} section_link("benchmark.R", "benchmark-settings")` section.
+
+<details><summary>Table: the order of each session</summary>
+
+```{r}
+#| label: table-order
+runs |>
+  select(session, position, version) |>
+  arrange(session, position) |>
+  dt_table()
+```
+
+</details>
+
+Every call is timed with {bench}'s `mark()` and saved as `mark()` made it, so `summary()` and `autoplot()` work on it. Under each timing, one table is bench's `summary()` of every mark, with the mean and longest of its calls added, and the other has every call.
+
+The same `mcmc()` arguments are the same work only if each version's sampler runs the same number of iterations for each draw it keeps. `benchmark.R`'s `{r} section_link("benchmark.R", "benchmark-sampler-iterations")` section counts them, and in every session they were `{r} paste(sampler_iterations_values$version, sampler_iterations_values$values, collapse = ", ")`.
+
+<details><summary>Table: sampler iterations per kept draw, in every session</summary>
+
+```{r}
+#| label: table-sampler-iterations
+sampler_iterations_per_draw |>
+  select(session, version, sampler_iterations_per_draw = value) |>
+  dt_table()
+```
+
+</details>
+
+Two scripts made every result here: `{r} file_link("benchmark.R")` is what each version runs, and `{r} file_link("run.R")` runs it for each version in each session. Both in full:
+
+```{r}
+#| label: run-script
+#| file: run.R
+#| eval: false
+#| code-summary: "run.R"
+```
+
+```{r}
+#| label: benchmark-script
+#| file: benchmark.R
+#| eval: false
+#| code-summary: "benchmark.R"
+```
+
+### The models
+
+Four models are from greta's `inst/examples/`; the hessian model is the one greta#546 reported. Normal and log-normal distributions are written with their mean and standard deviation, as greta's `normal()` and `lognormal()` take them; $\text{Cauchy}^{+}$ is a Cauchy truncated to positive values.
+
+::: panel-tabset
+
+#### linear
+
+A regression of each department's rating in `attitude` on its number of complaints. `{r} parameter_count("linear")` parameters.
+
+$$
+\begin{aligned}
+\text{rating}_i &\sim \text{Normal}(\mu_i, \sigma), \quad i = 1, \dots, 30 \\
+\mu_i &= \alpha + \beta \, \text{complaints}_i \\
+\alpha, \beta &\sim \text{Normal}(0, 10) \\
+\sigma &\sim \text{Cauchy}^{+}(0, 3)
+\end{aligned}
+$$
+
+```{r}
+#| label: model-linear
+#| eval: false
+#| code-summary: "benchmark.R: model-linear"
+```
+
+#### multiple_linear
+
+The same rating on all six of `attitude`'s other columns, $X$, through a matrix multiply. `{r} parameter_count("multiple_linear")` parameters.
+
+$$
+\begin{aligned}
+\text{rating}_i &\sim \text{Normal}(\mu_i, \sigma), \quad i = 1, \dots, 30 \\
+\mu_i &= \alpha + \sum_{j = 1}^{6} X_{ij} \, \beta_j \\
+\alpha, \beta_j &\sim \text{Normal}(0, 10) \\
+\sigma &\sim \text{Cauchy}^{+}(0, 3)
+\end{aligned}
+$$
+
+```{r}
+#| label: model-multiple-linear
+#| eval: false
+#| code-summary: "benchmark.R: model-multiple-linear"
+```
+
+#### hierarchical_linear
+
+Sepal length on sepal width in `iris`, with an offset for each species, $s[i]$ being flower $i$'s. Setosa's offset is zero and the other two share a scale, $\tau$. `{r} parameter_count("hierarchical_linear")` parameters.
+
+$$
+\begin{aligned}
+\text{Sepal.Length}_i &\sim \text{Normal}(\mu_i, \sigma), \quad i = 1, \dots, 150 \\
+\mu_i &= \alpha + \beta \, \text{Sepal.Width}_i + \gamma_{s[i]} \\
+\gamma_1 &= 0, \qquad \gamma_2, \gamma_3 \sim \text{Normal}(0, \tau) \\
+\tau &\sim \text{LogNormal}(0, 1) \\
+\alpha, \beta &\sim \text{Normal}(0, 10) \\
+\sigma &\sim \text{Cauchy}^{+}(0, 3)
+\end{aligned}
+$$
+
+```{r}
+#| label: model-hierarchical-linear
+#| eval: false
+#| code-summary: "benchmark.R: model-hierarchical-linear"
+```
+
+#### eight_schools
+
+The effect of coaching in eight schools, $y_j$, each measured with a known standard error, $\sigma_j$. The scale of the school effects, $\sigma_\eta$, is itself a parameter, which makes the posterior a funnel. `{r} parameter_count("eight_schools")` parameters.
+
+$$
+\begin{aligned}
+y_j &\sim \text{Normal}(\theta_j, \sigma_j), \quad j = 1, \dots, 8 \\
+\theta_j &= \mu + \xi \, \eta_j \\
+\eta_j &\sim \text{Normal}(0, \sigma_\eta) \\
+\sigma_\eta &\sim \text{InverseGamma}(1, 1) \\
+\mu &\sim \text{Normal}(0, 100) \\
+\xi &\sim \text{Normal}(0, 5)
+\end{aligned}
+$$
+
+```{r}
+#| label: model-eight-schools
+#| eval: false
+#| code-summary: "benchmark.R: model-eight-schools"
+```
+
+#### hessian model
+
+Used only for `opt(hessian = TRUE)`: twenty simulated observations $y_k$, each with its own mean $b_k$, so each call takes twenty hessians. greta's `variable()` gives $b_k$ a flat prior, so it has no distribution line.
+
+$$
+y_k \sim \text{Normal}(b_k, 1), \quad k = 1, \dots, 20
+$$
+
+```{r}
+#| label: model-hessian
+#| eval: false
+#| code-summary: "benchmark.R: model-hessian"
+```
+
+:::
+
+## Session details
+
+What each version reported about itself in session 1, from `benchmark.R`'s `{r} section_link("benchmark.R", "benchmark-provenance")` section.
 
 ```{r}
 #| label: session-one
 session_one <- runs |>
   filter(session == 1) |>
   arrange(version)
+
+# a saved session_info() prints with sessioninfo's print method, which is
+# registered only once its namespace is loaded
+invisible(loadNamespace("sessioninfo"))
 ```
 
 ::: panel-tabset

@@ -1,27 +1,22 @@
 ---
-title: "Warmup schemes on the tf-warmup-i547 branch"
-description: "greta's warmup tuning, the same with greta#841's count fixed, Stan's windowed scheme from greta#853, and TFP's own windowed HMC and NUTS, run inside TensorFlow on the same models: the step sizes they tune, how long they take, and the effective samples they give."
+title: "greta#853 (windowed-adaptation-i853): warmup schemes compared"
+description: "Five warmup schemes run inside TensorFlow on five models: greta's own, greta's with greta#841's count fixed, Stan's windowed scheme from greta#853, and TFP's windowed HMC and NUTS. Stan's scheme finds the scales of the normals that greta's own misses, and gives more effective samples per second than greta's on every model but eight_schools."
 date: 2026-10-07
 bibliography: ../../references.bib
 ---
 
-The tf-warmup-i547 branch of greta tunes warmup inside TensorFlow ([greta#547](https://github.com/greta-dev/greta/issues/547)), which makes it cheap to try other ways of tuning. This post compares five, on the same five models:
-
-- **greta**: greta's own tuning, as on main. It adapts the step size, `epsilon`, by dual averaging over the first 10% and last 60% of warmup [@hoffman2014], and `diag_sd` from the variance of every warmup draw so far between 10% and 40%, shrunk by a count of the *rejected* proposals.
-- **greta_841**: the same, shrunk by a count of the accepted proposals, as [greta#841](https://github.com/greta-dev/greta/issues/841) says it was meant to be.
-- **windowed**: Stan's windowed adaptation, as proposed in [greta#853](https://github.com/greta-dev/greta/issues/853). After a buffer that adapts `epsilon` only, `diag_sd` is estimated afresh in windows ending at 25%, 45% and 90% of warmup, each from its own draws, and dual averaging restarts after each.
-- **tfp_hmc** and **tfp_nuts**: TFP's own windowed adaptation of HMC and NUTS, as its `windowed_adaptive_hmc()` and `windowed_adaptive_nuts()` use it, driven from the same log density. TFP's HMC takes a fixed number of leapfrog steps, where greta's draws one between `Lmin` and `Lmax` every iteration.
-
-The first three are an internal choice on the branch, not something `mcmc()` offers yet.
-
 ```{r}
 #| label: setup
-#| message: false
-library(dplyr)
-library(tidyr)
-library(ggplot2)
-library(bench)
-library(here)
+#| code-summary: "Setup"
+# the packages' start-up messages, such as where here() finds the project, are
+# not part of the results
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(tidyr)
+  library(ggplot2)
+  library(bench)
+  library(here)
+})
 
 post_path <- "posts/2026-10-07-warmup-adaptation-i853"
 
@@ -42,13 +37,9 @@ github_file_url <- function(file) {
     file
   )
 }
-# Quarto escapes the markdown in an inline `{r}` result unless it is wrapped
-# in I(), so both link helpers return I()
-file_link <- function(file) {
-  I(paste0("[`", file, "`](", github_file_url(file), ")"))
-}
 
-# a link to the lines of a script's `# ---- label ----` section
+# a link to the lines of a script's `# ---- label ----` section. Quarto escapes
+# the markdown in an inline `{r}` result unless it is wrapped in I()
 section_link <- function(file, label) {
   lines <- readLines(here(post_path, file))
   headings <- grep("^# ---- .+ ----$", lines)
@@ -60,6 +51,47 @@ section_link <- function(file, label) {
   I(paste0(
     "[`", label, "`](", github_file_url(file), "#L", start, "-L", end, ")"
   ))
+}
+
+# "a, b and c"
+paste_and <- function(x) {
+  if (length(x) < 2) {
+    return(x)
+  }
+  paste(paste(head(x, -1), collapse = ", "), "and", tail(x, 1))
+}
+
+# links to several sections of a script, as "a, b and c"
+section_links <- function(file, labels) {
+  links <- vapply(labels, \(label) section_link(file, label), character(1))
+  I(paste_and(links))
+}
+
+# three significant figures each, where format() would pad a vector to the
+# decimal places of its smallest value. formatC() pads a number with fewer
+# than three significant figures with spaces, which trimws() removes
+format_number <- function(x) {
+  trimws(formatC(signif(x, 3), format = "fg", digits = 3, big.mark = ","))
+}
+
+# "3.25 to 4.81": the smallest and largest of x
+format_range <- function(x) {
+  paste(format_number(min(x)), "to", format_number(max(x)))
+}
+
+# a searchable table, its numbers rounded for reading
+dt_table <- function(data, digits = 3) {
+  table <- DT::datatable(
+    data,
+    rownames = FALSE,
+    filter = "top",
+    options = list(pageLength = 10, autoWidth = TRUE)
+  )
+  decimal_columns <- names(data)[vapply(data, is.double, logical(1))]
+  if (length(decimal_columns) == 0) {
+    return(table)
+  }
+  DT::formatRound(table, decimal_columns, digits)
 }
 
 theme_set(theme_bw(base_size = 13))
@@ -74,7 +106,10 @@ n_sessions <- length(sessions)
 results <- lapply(sessions, \(session_file) session_file$results$branch)
 bench_settings <- results[[1]]$bench_settings
 model_levels <- names(results[[1]]$schemes)
-method_levels <- c(bench_settings$schemes, paste0("tfp_", bench_settings$tfp_kinds))
+method_levels <- c(
+  bench_settings$schemes,
+  paste0("tfp_", bench_settings$tfp_kinds)
+)
 method_colours <- setNames(
   c("#999999", "#56B4E9", "#009E73", "#E69F00", "#CC79A7"),
   method_levels
@@ -82,6 +117,47 @@ method_colours <- setNames(
 method_scale <- scale_colour_manual(values = method_colours, guide = "none")
 method_fill <- scale_fill_manual(values = method_colours, guide = "none")
 jitter <- position_jitter(width = 0, height = 0.2, seed = 2026)
+
+# each model's runs are its `bench-` section of benchmark.R
+bench_links <- section_links(
+  "benchmark.R",
+  paste0("bench-", gsub("_", "-", model_levels))
+)
+
+# A raincloud for each method: the density of its sessions above, their box
+# plot in the middle, and every session as a dot below. The summaries are
+# drawn first and faint, so the dots sit on top.
+raincloud <- list(
+  ggdist::stat_halfeye(
+    aes(fill = method),
+    width = 0.4,
+    justification = -0.3,
+    .width = 0,
+    point_colour = NA,
+    alpha = 0.3
+  ),
+  geom_boxplot(
+    aes(fill = method),
+    width = 0.25,
+    outlier.shape = NA,
+    alpha = 0.3
+  ),
+  # a fixed dot size, so a session looks the same size in every panel
+  ggdist::stat_dots(
+    aes(fill = method),
+    side = "bottom",
+    layout = "swarm",
+    justification = 1.3,
+    scale = 0.75,
+    binwidth = unit(2.6, "mm"),
+    overflow = "compress",
+    colour = NA,
+    alpha = 0.6
+  ),
+  method_scale,
+  method_fill,
+  theme_bw(base_size = 13)
+)
 
 # one row per timed call, from every session, model and method
 every_call <- lapply(seq_along(results), function(i) {
@@ -109,10 +185,26 @@ every_call <- lapply(seq_along(results), function(i) {
     method = factor(method, levels = method_levels),
     model = factor(model, levels = model_levels),
     calls = factor(
-      ifelse(call == 1, "first call on a new model", "second call on the same model"),
-      levels = c("first call on a new model", "second call on the same model")
+      ifelse(call == 1, "first call", "second call"),
+      levels = c("first call", "second call")
     )
   )
+
+# posterior caps a bulk ESS at S × log10(S) for S draws, and warns each time it
+# does. Count those warnings here, keep the cap beside each estimate, and say
+# what they mean under the effective samples plot.
+ess_cap_warnings <- 0
+summarise_counting_caps <- function(draws) {
+  withCallingHandlers(
+    posterior::summarise_draws(draws, "mean", "sd", "rhat", "ess_bulk"),
+    warning = function(w) {
+      if (grepl("The ESS has been capped", conditionMessage(w), fixed = TRUE)) {
+        ess_cap_warnings <<- ess_cap_warnings + 1
+        invokeRestart("muffleWarning")
+      }
+    }
+  )
+}
 
 # a posterior summary of every method's second-call draws, in every session
 posterior_summaries <- lapply(seq_along(results), function(i) {
@@ -125,17 +217,14 @@ posterior_summaries <- lapply(seq_along(results), function(i) {
       )
     )
     lapply(names(draws), function(method) {
+      n_draws <- posterior::ndraws(draws[[method]])
       tibble(
         session = sessions[[i]]$session,
         model = model_name,
         method = method,
-        posterior::summarise_draws(
-          draws[[method]],
-          "mean",
-          "sd",
-          "rhat",
-          "ess_bulk"
-        )
+        summarise_counting_caps(draws[[method]]),
+        n_draws = n_draws,
+        ess_cap = n_draws * log10(n_draws)
       )
     }) |>
       bind_rows()
@@ -145,34 +234,349 @@ posterior_summaries <- lapply(seq_along(results), function(i) {
   bind_rows() |>
   mutate(
     method = factor(method, levels = method_levels),
-    model = factor(model, levels = model_levels)
+    model = factor(model, levels = model_levels),
+    ess_capped = ess_bulk >= ess_cap * (1 - 1e-9)
   )
 
-# three significant figures each, where format() would pad a vector to the
-# decimal places of its smallest value
-format_number <- function(x) {
-  formatC(signif(x, 3), format = "fg", digits = 3, big.mark = ",")
+second_calls <- every_call |>
+  filter(call == 2) |>
+  select(session, model, method, seconds)
+
+# each run's smallest bulk ESS and largest R-hat, and that ESS per second of
+# the run's second call, warmup included
+efficiency <- posterior_summaries |>
+  group_by(session, model, method) |>
+  summarise(
+    smallest_ess_bulk = min(ess_bulk),
+    smallest_ess_capped = ess_capped[which.min(ess_bulk)],
+    largest_rhat = max(rhat),
+    .groups = "drop"
+  ) |>
+  left_join(second_calls, by = c("session", "model", "method")) |>
+  mutate(smallest_ess_per_second = smallest_ess_bulk / seconds)
+
+# each method's median over sessions, as a multiple of greta's own scheme's
+# median on the same model
+relative_to_greta <- function(data, value) {
+  data |>
+    group_by(model, method) |>
+    summarise(median = median({{ value }}), .groups = "drop") |>
+    group_by(model) |>
+    mutate(times_greta = median / median[method == "greta"]) |>
+    ungroup()
 }
 
-# a searchable table, its numbers rounded for reading
-dt_table <- function(data, digits = 3) {
-  table <- DT::datatable(
-    data,
-    rownames = FALSE,
-    filter = "top",
-    options = list(pageLength = 10, autoWidth = TRUE)
-  )
-  decimal_columns <- names(data)[vapply(data, is.double, logical(1))]
-  if (length(decimal_columns) == 0) {
-    return(table)
-  }
-  DT::formatRound(table, decimal_columns, digits)
+# one method's multiples of greta's, named by model
+times_greta <- function(ratios, scheme) {
+  scheme_ratios <- filter(ratios, method == scheme)
+  setNames(scheme_ratios$times_greta, scheme_ratios$model)
 }
 
-session_caption <- "Each small dot is one session's second call. The large faint dot behind them is their mean."
+ess_per_second_ratios <- relative_to_greta(efficiency, smallest_ess_per_second)
+windowed_ess_per_second <- times_greta(ess_per_second_ratios, "windowed")
 ```
 
-Two scripts made every result here. `{r} file_link("benchmark.R")` is what the branch runs, in a fresh R session, and `{r} file_link("run.R")` runs it in each session. Each section below shows the part of a script it is about, read out of the script by its `# ---- label ----` heading and linked to those lines on GitHub. All the code on this page is folded: click a fold to open it.
+[greta#853](https://github.com/greta-dev/greta/issues/853) is an issue, not a PR: it proposes that `hmc()` adapt `diag_sd` in windows during warmup, as Stan does, and the windowed-adaptation-i853 branch adds that scheme to greta's sampler as an internal choice. This post runs it beside greta's own scheme, greta's with [greta#841](https://github.com/greta-dev/greta/issues/841)'s count fixed, and TFP's windowed HMC and NUTS, all inside TensorFlow on one greta commit and five models; it is not part of PR [greta#855](https://github.com/greta-dev/greta/pull/855). The windowed scheme gives `{r} format_number(windowed_ess_per_second[["normals"]])` times the smallest bulk ESS per second of greta's own scheme on twenty normals of very different scales, `{r} format_range(windowed_ess_per_second[c("linear", "multiple_linear", "hierarchical_linear")])` times on linear, multiple_linear and hierarchical_linear, and `{r} format_number(windowed_ess_per_second[["eight_schools"]])` times on eight_schools.
+
+## The five schemes
+
+- **greta**: greta's own tuning. It adapts the step size, `epsilon`, by dual averaging over the first 10% and last 60% of warmup [@hoffman2014], and estimates `diag_sd` between 10% and 40% of warmup from every warmup draw so far, shrunk by a count of the *rejected* proposals, then fixes it.
+- **greta_841**: the same, shrunk by a count of the *accepted* proposals, as [greta#841](https://github.com/greta-dev/greta/issues/841) says it was meant to be.
+- **windowed**: Stan's windowed adaptation, from greta#853. After a buffer that adapts `epsilon` only, it estimates `diag_sd` afresh in windows ending at 25%, 45% and 90% of warmup, each from its own draws, and restarts dual averaging after each.
+- **tfp_hmc** and **tfp_nuts**: TFP's own windowed adaptation of HMC and NUTS, as its `windowed_adaptive_hmc()` and `windowed_adaptive_nuts()` use it, on the same log density. TFP's HMC takes `{r} bench_settings$tfp_leapfrog_steps` leapfrog steps every iteration, where greta's draws a number between `Lmin` and `Lmax`.
+
+## Does each scheme find the normals' scales?
+
+For greta's three schemes, each normal's tuned `diag_sd` over its true standard deviation, so 1 is a perfect estimate. TFP keeps its estimate inside its kernel results, which the benchmark does not return.
+
+```{r}
+#| label: tuned-scales
+true_sd <- results[[1]]$normals_sd
+tuned_scales <- lapply(seq_along(results), function(i) {
+  tuned <- results[[i]]$schemes$normals$tuned
+  lapply(names(tuned), function(scheme) {
+    tibble(
+      session = sessions[[i]]$session,
+      method = scheme,
+      true_sd = true_sd,
+      ratio = tuned[[scheme]]$diag_sd / true_sd
+    )
+  }) |>
+    bind_rows()
+}) |>
+  bind_rows() |>
+  mutate(method = factor(method, levels = method_levels))
+
+# each scheme's tuned diag_sd over the true sd, named by scheme
+tuned_ratios <- split(tuned_scales$ratio, tuned_scales$method, drop = TRUE)
+```
+
+```{r}
+#| label: plot-tuned-scales
+#| fig-cap: "Each dot is one normal in one session, on log scales. The grey line is a perfect estimate."
+#| fig-height: 4
+ggplot(tuned_scales, aes(x = true_sd, y = ratio, colour = method)) +
+  geom_hline(yintercept = 1, colour = "grey60") +
+  geom_point(alpha = 0.7) +
+  scale_x_log10() +
+  scale_y_log10() +
+  method_scale +
+  facet_wrap(~method) +
+  labs(x = "True standard deviation", y = "Tuned diag_sd / true sd")
+```
+
+Tuned in `benchmark.R`'s `{r} section_link("benchmark.R", "bench-normals")` section, by `run_schemes()` from its `{r} section_link("benchmark.R", "benchmark-schemes")` section, which keeps each scheme's `diag_sd`.
+
+The windowed scheme's `diag_sd` is `{r} format_range(tuned_ratios$windowed)` times the true standard deviation. greta's own is `{r} format_range(tuned_ratios$greta)` times, furthest off on the widest normals, and greta#841's count leaves it much the same, at `{r} format_range(tuned_ratios$greta_841)` times.
+
+## How long does each scheme take?
+
+Seconds for the second call on each model, which reuses the first call's trace. The effective samples per second below divide by these.
+
+```{r}
+#| label: speed
+speed_ratios <- relative_to_greta(second_calls, seconds)
+```
+
+```{r}
+#| label: plot-speed
+#| fig-cap: "Each dot is one session's second call, on a log scale. Above the dots, the curve is the density of the sessions and the box marks their median and quartiles."
+#| fig-height: 12
+ggplot(second_calls, aes(x = seconds, y = method, colour = method)) +
+  raincloud +
+  scale_x_log10() +
+  facet_wrap(~model, ncol = 1, scales = "free_x") +
+  labs(x = "Seconds", y = NULL)
+```
+
+Timed by `benchmark.R`'s `{r} bench_links` sections, which call `run_schemes()` from its `{r} section_link("benchmark.R", "benchmark-schemes")` section and `run_tfp()` from its `{r} section_link("benchmark.R", "benchmark-tfp")` section.
+
+On the five models, the windowed scheme takes `{r} format_range(times_greta(speed_ratios, "windowed"))` times as long as greta's own, and greta_841 `{r} format_range(times_greta(speed_ratios, "greta_841"))` times, so the three cost about the same. TFP's HMC takes `{r} format_range(times_greta(speed_ratios, "tfp_hmc"))` times as long as greta's, and TFP's NUTS `{r} format_range(times_greta(speed_ratios, "tfp_nuts"))` times.
+
+<details><summary>Table: median seconds of the first and second calls</summary>
+
+```{r}
+#| label: table-speed
+every_call |>
+  group_by(model, calls, method) |>
+  summarise(seconds = median(seconds), .groups = "drop") |>
+  pivot_wider(names_from = method, values_from = seconds) |>
+  dt_table(digits = 2)
+```
+
+</details>
+
+## How many effective samples per second does each give?
+
+The bulk ESS of each run's worst-mixing parameter, as @hoffman2014 report it, per second of the second call, warmup included [@girolami2011].
+
+```{r}
+#| label: efficiency
+capped_estimates <- filter(posterior_summaries, ess_capped)
+capped_runs <- distinct(capped_estimates, session, model, method)
+
+# every run as a small dot over a large faint mean, for the smallest ESS here
+# and the largest R-hat in the checks
+efficiency_means <- efficiency |>
+  group_by(model, method) |>
+  summarise(
+    across(c(smallest_ess_bulk, largest_rhat), mean),
+    .groups = "drop"
+  )
+
+gg_sessions <- function(x, x_label) {
+  ggplot(efficiency, aes(x = {{ x }}, y = method, colour = method)) +
+    geom_point(data = efficiency_means, size = 5, alpha = 0.25) +
+    geom_point(position = jitter, size = 1.2) +
+    method_scale +
+    facet_wrap(~model, ncol = 1, scales = "free_x") +
+    labs(x = x_label, y = NULL)
+}
+```
+
+```{r}
+#| label: plot-ess-per-second
+#| fig-cap: "Each dot is one session's run, on a log scale. Above the dots, the curve is the density of the sessions and the box marks their median and quartiles."
+#| fig-height: 12
+ggplot(
+  efficiency,
+  aes(x = smallest_ess_per_second, y = method, colour = method)
+) +
+  raincloud +
+  scale_x_log10() +
+  facet_wrap(~model, ncol = 1, scales = "free_x") +
+  labs(x = "Smallest bulk ESS per second", y = NULL)
+```
+
+Draws and times from `benchmark.R`'s `{r} bench_links` sections, which call `run_schemes()` from its `{r} section_link("benchmark.R", "benchmark-schemes")` section and `run_tfp()` from its `{r} section_link("benchmark.R", "benchmark-tfp")` section.
+
+The windowed scheme gives `{r} format_number(windowed_ess_per_second[["normals"]])` times the smallest bulk ESS per second of greta's own scheme on the normals, `{r} format_range(windowed_ess_per_second[c("linear", "multiple_linear", "hierarchical_linear")])` times on linear, multiple_linear and hierarchical_linear, and `{r} format_number(windowed_ess_per_second[["eight_schools"]])` times on eight_schools. On the five models, greta_841 gives `{r} format_range(times_greta(ess_per_second_ratios, "greta_841"))` times greta's, TFP's HMC `{r} format_range(times_greta(ess_per_second_ratios, "tfp_hmc"))` times, and TFP's NUTS `{r} format_range(times_greta(ess_per_second_ratios, "tfp_nuts"))` times.
+
+Anticorrelated draws, which `hmc()` can give on independent normals, have an ESS above their number, and posterior caps it at S × log10(S), or `{r} format_number(unique(posterior_summaries$ess_cap))` for these `{r} format_number(unique(posterior_summaries$n_draws))` draws, with a warning each time. It capped `{r} nrow(capped_estimates)` estimates in `{r} nrow(capped_runs)` runs, all on `{r} paste_and(unique(as.character(capped_runs$model)))` with `{r} paste_and(unique(as.character(capped_runs$method)))` (its `{r} ess_cap_warnings` warnings are counted and silenced in Setup), and `{r} sum(efficiency$smallest_ess_capped)` of the `{r} nrow(efficiency)` runs had a capped estimate as their smallest ESS, the number compared here.
+
+<details><summary>Figure: smallest bulk ESS, not per second</summary>
+
+```{r}
+#| label: plot-ess
+#| fig-cap: "Each small dot is one session's run, on a log scale. The large faint dot behind them is their mean."
+#| fig-height: 12
+gg_sessions(smallest_ess_bulk, "Smallest bulk ESS") +
+  scale_x_log10()
+```
+
+</details>
+
+<details><summary>Table: median smallest bulk ESS per second, and as a multiple of greta's</summary>
+
+```{r}
+#| label: table-ess-per-second
+ess_per_second_ratios |>
+  rename(smallest_ess_per_second = median) |>
+  dt_table(digits = 2)
+```
+
+</details>
+
+<details><summary>Table: every run</summary>
+
+```{r}
+#| label: table-efficiency
+efficiency |>
+  select(
+    session,
+    model,
+    method,
+    smallest_ess_bulk,
+    seconds,
+    smallest_ess_per_second,
+    largest_rhat
+  ) |>
+  dt_table(digits = 2)
+```
+
+</details>
+
+## Checks
+
+### Do the chains converge?
+
+The largest R-hat of each run, against the 1.01 that @vehtari2021 recommend.
+
+```{r}
+#| label: rhat
+rhat_threshold <- 1.01
+runs_over_threshold <- efficiency |>
+  group_by(method) |>
+  summarise(over = sum(largest_rhat > rhat_threshold), runs = n())
+runs_over_text <- I(paste_and(paste0(
+  "`",
+  runs_over_threshold$method,
+  "` ",
+  runs_over_threshold$over
+)))
+```
+
+```{r}
+#| label: plot-rhat
+#| fig-cap: "Each small dot is one session's run. The large faint dot behind them is their mean, and the grey line is 1.01."
+#| fig-height: 12
+gg_sessions(largest_rhat, "Largest R-hat") +
+  geom_vline(xintercept = rhat_threshold, colour = "grey60")
+```
+
+From the same draws, made in `benchmark.R`'s `{r} bench_links` sections.
+
+Of each scheme's `{r} unique(runs_over_threshold$runs)` runs, this many have a largest R-hat above `{r} rhat_threshold`: `{r} runs_over_text`. At `{r} bench_settings$warmup` warmup iterations and `{r} bench_settings$n_samples` draws per chain, `{r} sum(runs_over_threshold$over)` of the `{r} nrow(efficiency)` runs miss that threshold, so most of the effective samples above come from chains that have not converged by that rule.
+
+### Do the draws have the right spread?
+
+On the normals, where the truth is known: each normal's posterior standard deviation over its true one.
+
+```{r}
+#| label: posterior-scales
+posterior_scales <- posterior_summaries |>
+  filter(model == "normals") |>
+  mutate(
+    true_sd = true_sd[as.integer(sub("x\\[([0-9]+),1\\]", "\\1", variable))],
+    ratio = sd / true_sd
+  )
+
+spread_ranges <- posterior_scales |>
+  group_by(method) |>
+  summarise(range = format_range(ratio))
+spread_text <- I(paste_and(paste0(
+  "`",
+  spread_ranges$method,
+  "` ",
+  spread_ranges$range
+)))
+```
+
+```{r}
+#| label: plot-posterior-scales
+#| fig-cap: "Each dot is one normal in one session, on log scales. The grey line is a perfect estimate."
+#| fig-height: 6
+ggplot(posterior_scales, aes(x = true_sd, y = ratio, colour = method)) +
+  geom_hline(yintercept = 1, colour = "grey60") +
+  geom_point(alpha = 0.7) +
+  scale_x_log10() +
+  scale_y_log10() +
+  method_scale +
+  facet_wrap(~method) +
+  labs(x = "True standard deviation", y = "Posterior sd / true sd")
+```
+
+From the draws made in `benchmark.R`'s `{r} section_link("benchmark.R", "bench-normals")` section.
+
+Each normal's posterior standard deviation is this many times its true one: `{r} spread_text`.
+
+## How it was measured
+
+```{r}
+#| label: provenance
+provenance <- bind_rows(lapply(results, \(result) result$provenance))
+session_numbers <- vapply(sessions, \(session) session$session, numeric(1))
+
+# a session that pak installed from GitHub records the commit; one installed
+# from a local worktree records its path, and run.R's run-versions section
+# names the commit that worktree was clean at
+installed_from <- vapply(
+  sessions,
+  \(session) session$versions[["branch"]],
+  character(1)
+)
+installed_locally <- startsWith(installed_from, "local::")
+measured_commit <- unique(sub(
+  "^greta-dev/greta@",
+  "",
+  installed_from[!installed_locally]
+))
+commit_link <- I(paste0(
+  "[",
+  substr(measured_commit, 1, 7),
+  "](https://github.com/greta-dev/greta/commit/",
+  measured_commit,
+  ")"
+))
+```
+
+Every result here is from one greta commit, `{r} commit_link`, on tf-warmup-i547, the branch of PR greta#855, which then carried the greta_841 and windowed schemes as an internal choice for comparison. Those two have since moved to windowed-adaptation-i853, a local branch built on the PR's branch, and are not part of the PR; TFP's two schemes are driven from `benchmark.R` itself. `run.R`'s `{r} section_link("run.R", "run-versions")` section pins the commit: sessions `{r} paste_and(session_numbers[installed_locally])` installed it from a local worktree clean at the commit, and sessions `{r} paste_and(session_numbers[!installed_locally])` from GitHub.
+
+`run.R`'s `{r} section_link("run.R", "run-sessions")` section ran `benchmark.R` in `{r} n_sessions` fresh R sessions, one after another, on `{r} unique(provenance$machine)` with `{r} unique(provenance$cores)` cores, TensorFlow `{r} unique(provenance$tensorflow_version)` and TensorFlow Probability `{r} unique(provenance$tfp_version)`. Each session ran every scheme on every model, with a seed of its own from `benchmark.R`'s `{r} section_link("benchmark.R", "benchmark-setup")` section: `{r} bench_settings$chains` chains of `{r} bench_settings$warmup` warmup iterations and `{r} bench_settings$n_samples` draws, called `{r} bench_settings$mcmc_calls` times, as its `{r} section_link("benchmark.R", "benchmark-settings")` section sets. greta's three schemes run through `mcmc()`, with the scheme set on greta's internal sampler class, in its `{r} section_link("benchmark.R", "benchmark-schemes")` section; TFP's two run through TFP's windowed sampling on the same log density, in its `{r} section_link("benchmark.R", "benchmark-tfp")` section.
+
+```{r}
+#| label: benchmark-schemes
+#| eval: false
+#| code-summary: "benchmark.R: benchmark-schemes"
+```
+
+```{r}
+#| label: benchmark-tfp
+#| eval: false
+#| code-summary: "benchmark.R: benchmark-tfp"
+```
+
+Both scripts, in full:
 
 ```{r}
 #| label: run-script
@@ -188,295 +592,57 @@ Two scripts made every result here. `{r} file_link("benchmark.R")` is what the b
 #| code-summary: "benchmark.R"
 ```
 
-## What was compared
+### The models
 
-The branch alone, installed as `{r} section_link("run.R", "run-versions")` says, in `{r} n_sessions` sessions by `{r} section_link("run.R", "run-sessions")`. It ran on TensorFlow `{r} results[[1]]$provenance$tensorflow_version` and TensorFlow Probability `{r} results[[1]]$provenance$tfp_version`, on `{r} results[[1]]$provenance$machine` with `{r} results[[1]]$provenance$cores` cores.
-
-```{r}
-#| label: run-versions
-#| eval: false
-#| code-summary: "run.R: run-versions"
-```
-
-```{r}
-#| label: run-sessions
-#| eval: false
-#| code-summary: "run.R: run-sessions"
-```
-
-Each session ran `benchmark.R` from top to bottom, with the seed and settings in its `{r} section_link("benchmark.R", "benchmark-setup")` and `{r} section_link("benchmark.R", "benchmark-settings")` sections:
-
-```{r}
-#| label: benchmark-setup
-#| eval: false
-#| code-summary: "benchmark.R: benchmark-setup"
-```
-
-```{r}
-#| label: benchmark-settings
-#| eval: false
-#| code-summary: "benchmark.R: benchmark-settings"
-```
-
-greta's three schemes run through `mcmc()`, in `{r} section_link("benchmark.R", "benchmark-schemes")`; TFP's two through its windowed sampling, in `{r} section_link("benchmark.R", "benchmark-tfp")`:
-
-```{r}
-#| label: benchmark-schemes
-#| eval: false
-#| code-summary: "benchmark.R: benchmark-schemes"
-```
-
-```{r}
-#| label: benchmark-tfp
-#| eval: false
-#| code-summary: "benchmark.R: benchmark-tfp"
-```
-
-## The models
+Twenty independent normals with standard deviations from `{r} min(true_sd)` to `{r} max(true_sd)`, greta#853's test: their scales span four orders of magnitude, so a `diag_sd` that is off on one scale shows. The other four are greta's examples, written out in maths in [the PR's main post](../2026-10-07-tf-warmup-i547/#the-models).
 
 ::: panel-tabset
 
-### normals
-
-Twenty independent normals with standard deviations from 0.01 to 100, the test in [greta#853](https://github.com/greta-dev/greta/issues/853): a posterior whose scales span four orders of magnitude, so a `diag_sd` that is off on one scale shows. Its section is `{r} section_link("benchmark.R", "model-normals")`.
+#### normals
 
 ```{r}
 #| label: model-normals
+#| eval: false
 #| code-summary: "benchmark.R: model-normals"
 ```
 
-### linear
+#### linear
 
 ```{r}
 #| label: model-linear
+#| eval: false
 #| code-summary: "benchmark.R: model-linear"
 ```
 
-### multiple_linear
+#### multiple_linear
 
 ```{r}
 #| label: model-multiple-linear
+#| eval: false
 #| code-summary: "benchmark.R: model-multiple-linear"
 ```
 
-### hierarchical_linear
+#### hierarchical_linear
 
 ```{r}
 #| label: model-hierarchical-linear
+#| eval: false
 #| code-summary: "benchmark.R: model-hierarchical-linear"
 ```
 
-### eight_schools
+#### eight_schools
 
 ```{r}
 #| label: model-eight-schools
+#| eval: false
 #| code-summary: "benchmark.R: model-eight-schools"
 ```
 
 :::
 
-The other four are greta's examples, as in the [thinning post](../2026-10-06-thinning-i318/#the-models), where they are also written out in maths. Each model's runs are its `bench-` section: `{r} section_link("benchmark.R", "bench-normals")`, `{r} section_link("benchmark.R", "bench-linear")`, `{r} section_link("benchmark.R", "bench-multiple-linear")`, `{r} section_link("benchmark.R", "bench-hierarchical-linear")` and `{r} section_link("benchmark.R", "bench-eight-schools")`.
-
-## The scales each scheme found, on the normals
-
-For greta's three schemes, the tuned `diag_sd` of each of the twenty normals, divided by its true standard deviation: 1 is a perfect estimate. TFP's schemes keep their estimate inside their kernel results, which the benchmark does not return, so they are left out here; their posterior standard deviations are in the next plot.
-
-```{r}
-#| label: tuned-scales
-true_sd <- results[[1]]$normals_sd
-tuned_scales <- lapply(seq_along(results), function(i) {
-  tuned <- results[[i]]$schemes$normals$tuned
-  lapply(names(tuned), function(scheme) {
-    ratio <- tuned[[scheme]]$diag_sd / true_sd
-    tibble(
-      session = sessions[[i]]$session,
-      method = scheme,
-      true_sd = true_sd,
-      ratio = ratio
-    )
-  }) |>
-    bind_rows()
-}) |>
-  bind_rows() |>
-  mutate(method = factor(method, levels = method_levels))
-
-posterior_scales <- posterior_summaries |>
-  filter(model == "normals") |>
-  mutate(
-    true_sd = true_sd[as.integer(sub("x\\[([0-9]+),1\\]", "\\1", variable))],
-    ratio = sd / true_sd
-  )
-```
-
-::: panel-tabset
-
-### Tuned diag_sd
-
-```{r}
-#| label: plot-tuned-scales
-#| fig-cap: "Each dot is one parameter in one session. The grey line is a perfect estimate."
-#| fig-height: 5
-ggplot(tuned_scales, aes(x = true_sd, y = ratio, colour = method)) +
-  geom_hline(yintercept = 1, colour = "grey60") +
-  geom_point(alpha = 0.7) +
-  scale_x_log10() +
-  scale_y_log10() +
-  scale_colour_manual(values = method_colours) +
-  facet_wrap(~method) +
-  labs(x = "True standard deviation", y = "Tuned diag_sd / true sd") +
-  theme(legend.position = "none")
-```
-
-### Posterior sd
-
-```{r}
-#| label: plot-posterior-scales
-#| fig-cap: "Each dot is one parameter in one session: the standard deviation of its draws over the true one. The grey line is a perfect estimate."
-#| fig-height: 5
-ggplot(posterior_scales, aes(x = true_sd, y = ratio, colour = method)) +
-  geom_hline(yintercept = 1, colour = "grey60") +
-  geom_point(alpha = 0.7) +
-  scale_x_log10() +
-  scale_y_log10() +
-  scale_colour_manual(values = method_colours) +
-  facet_wrap(~method) +
-  labs(x = "True standard deviation", y = "Posterior sd / true sd") +
-  theme(legend.position = "none")
-```
-
-:::
-
-## Speed
-
-Seconds for each call. The first call on a new model traces its TensorFlow functions; the second reuses them.
-
-```{r}
-#| label: speed
-speed_medians <- every_call |>
-  filter(call == 2) |>
-  group_by(model, method) |>
-  summarise(seconds = median(seconds), .groups = "drop")
-```
-
-```{r}
-#| label: plot-speed
-#| fig-cap: "Each dot is one call, from every session. The box marks their median and quartiles."
-#| fig-height: 14
-ggplot(every_call, aes(x = seconds, y = method, colour = method)) +
-  geom_boxplot(aes(fill = method), width = 0.4, outlier.shape = NA, alpha = 0.2) +
-  geom_point(position = jitter, alpha = 0.7) +
-  method_scale +
-  method_fill +
-  facet_wrap(vars(model, calls), ncol = 2, scales = "free_x") +
-  labs(x = "Seconds", y = NULL)
-```
-
-<details><summary>Table: median seconds of the second call</summary>
-
-```{r}
-#| label: table-speed
-speed_medians |>
-  pivot_wider(names_from = method, values_from = seconds) |>
-  dt_table(digits = 2)
-```
-
-</details>
-
-## Effective samples
-
-The bulk effective sample size of the parameter with the smallest, as @hoffman2014 report, and that per second of the second call, warmup included [@girolami2011]. Every method ran `{r} bench_settings$chains` chains of `{r} bench_settings$warmup` warmup iterations and `{r} bench_settings$n_samples` draws.
-
-```{r}
-#| label: efficiency
-second_calls <- every_call |>
-  filter(call == 2) |>
-  select(session, model, method, seconds)
-
-efficiency <- posterior_summaries |>
-  group_by(session, model, method) |>
-  summarise(
-    smallest_ess_bulk = min(ess_bulk),
-    largest_rhat = max(rhat),
-    .groups = "drop"
-  ) |>
-  left_join(second_calls, by = c("session", "model", "method")) |>
-  mutate(smallest_ess_per_second = smallest_ess_bulk / seconds)
-
-efficiency_means <- efficiency |>
-  group_by(model, method) |>
-  summarise(
-    across(c(smallest_ess_bulk, smallest_ess_per_second, largest_rhat), mean),
-    .groups = "drop"
-  )
-
-gg_sessions <- function(x, x_label) {
-  ggplot(efficiency, aes(x = {{ x }}, y = method, colour = method)) +
-    geom_point(data = efficiency_means, size = 5, alpha = 0.25) +
-    geom_point(position = jitter, size = 1.2) +
-    method_scale +
-    facet_wrap(~model, ncol = 1, scales = "free_x") +
-    labs(x = x_label, y = NULL)
-}
-```
-
-::: panel-tabset
-
-### Smallest bulk ESS
-
-```{r}
-#| label: plot-ess
-#| fig-cap: !expr session_caption
-#| fig-height: 12
-gg_sessions(smallest_ess_bulk, "Smallest bulk ESS")
-```
-
-### Smallest bulk ESS per second
-
-```{r}
-#| label: plot-ess-per-second
-#| fig-cap: !expr session_caption
-#| fig-height: 12
-gg_sessions(smallest_ess_per_second, "Smallest bulk ESS per second")
-```
-
-### Largest R-hat
-
-```{r}
-#| label: plot-rhat
-#| fig-cap: !expr session_caption
-#| fig-height: 12
-gg_sessions(largest_rhat, "Largest R-hat")
-```
-
-:::
-
-<details><summary>Table: mean over sessions</summary>
-
-```{r}
-#| label: table-efficiency-means
-dt_table(efficiency_means, digits = 2)
-```
-
-</details>
-
-<details><summary>Table: every session</summary>
-
-```{r}
-#| label: table-efficiency
-dt_table(efficiency, digits = 2)
-```
-
-</details>
-
 ## Session details
 
-What the branch reported about itself in session 1, from `benchmark.R`'s `{r} section_link("benchmark.R", "benchmark-provenance")` section:
-
-```{r}
-#| label: benchmark-provenance
-#| eval: false
-#| code-summary: "benchmark.R: benchmark-provenance"
-```
+What the branch reported about itself in session `{r} sessions[[1]]$session`, from `benchmark.R`'s `{r} section_link("benchmark.R", "benchmark-provenance")` section.
 
 <details><summary>`greta_sitrep()`</summary>
 
@@ -491,6 +657,9 @@ writeLines(results[[1]]$greta_sitrep_report)
 
 ```{r}
 #| label: session-info
+# a saved session_info() prints as a plain list unless sessioninfo's print
+# method is registered, which loading its namespace does
+invisible(loadNamespace("sessioninfo"))
 results[[1]]$session_info
 ```
 

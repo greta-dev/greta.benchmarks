@@ -1,5 +1,5 @@
 # Runs benchmark.R against the tf-warmup-i547 branch of greta, in a fresh R
-# session, in three sessions:
+# session, in five sessions:
 #
 #   Rscript --quiet --vanilla posts/2026-10-07-warmup-adaptation-i853/run.R
 #
@@ -8,15 +8,15 @@
 # starts a section that index.qmd shows by that label.
 
 # ---- run-versions ----
-# The warmup schemes are the tf-warmup-i547 branch's own, so it is the only
-# version. It was not on GitHub when this ran, so pak installed this commit
-# from its worktree, clean at the commit, and the saved results record that
-# local path. Three sessions rather than five, since NUTS takes several times
-# as long as the rest
+# The warmup schemes are an internal choice on the tf-warmup-i547 branch at
+# this commit, added in its ancestor 59da5cc9, so it is the only version.
+# Sessions 1 to 3 ran before the branch was on GitHub, so pak installed this
+# commit from its worktree, clean at the commit, and their saved results record
+# that local path; sessions 4 and 5 installed it from GitHub
 versions <- c(
   branch = "greta-dev/greta@92f34e3003c5db24f67534d4c9abe3255ee39ccf"
 )
-n_sessions <- 3
+n_sessions <- 5
 post_dir <- here::here("posts", "2026-10-07-warmup-adaptation-i853")
 
 # ---- run-sessions ----
