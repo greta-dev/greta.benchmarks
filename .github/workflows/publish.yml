@@ -30,7 +30,9 @@ jobs:
           use-public-rspm: true
 
       # the packages the posts use, rather than DESCRIPTION's, which are the
-      # targets pipeline's
+      # targets pipeline's. beeswarm is there for ggdist's swarm layout, which
+      # the rainclouds use. The list is a block of text, where a # line would
+      # be read as a package, so notes on it go here.
       - uses: r-lib/actions/setup-r-dependencies@v2
         with:
           packages: |
@@ -46,7 +48,6 @@ jobs:
             any::sessioninfo
             any::withr
             any::ggdist
-            # ggdist's swarm layout, which the rainclouds use, needs beeswarm
             any::beeswarm
             any::here
 
