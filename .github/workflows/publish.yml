@@ -46,6 +46,8 @@ jobs:
             any::sessioninfo
             any::withr
             any::ggdist
+            # ggdist's swarm layout, which the rainclouds use, needs beeswarm
+            any::beeswarm
             any::here
 
       - uses: actions/configure-pages@v6
