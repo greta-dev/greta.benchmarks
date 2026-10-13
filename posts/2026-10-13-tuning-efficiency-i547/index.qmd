@@ -1,0 +1,541 @@
+---
+title: "greta#855 (tf-warmup-i547): effective samples from its warmup tuning"
+description: "Effective samples per sampler iteration and per second of `mcmc()` with each version's defaults on main and greta#855, on four of greta's examples over twenty sessions. #855's warmup tunes to larger step sizes, gives more effective samples per sampler iteration on three of the four models, and gives 2.8 to 7.9 times main's effective samples per second."
+date: 2026-10-13
+bibliography: ../../references.bib
+---
+
+```{r}
+#| label: setup
+#| code-summary: "Setup"
+source(here::here("posts", "_helpers.R"))
+
+post_path <- "posts/2026-10-13-tuning-efficiency-i547"
+file_link <- file_linker(post_path)
+section_link <- section_linker(post_path)
+# the sections of benchmark.R, shown below by their labels
+knitr::read_chunk(here(post_path, "benchmark.R"))
+
+sessions <- read_sessions(post_path)
+n_sessions <- length(sessions)
+
+version_labels <- c(main = "main", `#855` = "#855")
+versions <- display_versions(sessions[[1]]$versions, labels = version_labels)
+version_levels <- names(versions)
+colours <- version_colours(version_levels)
+settings <- sessions[[1]]$results[[1]]$settings
+
+# how the text names each version: main links to its commit, #855 to the PR
+version_text <- c(
+  main = paste0("[main](", commit_url(versions[["main"]]), ")"),
+  `#855` = paste0("[#855](", pr_url(855), ")")
+)
+version_ref <- function(version) I(version_text[[version]])
+
+# one row per session and version, holding that version's results
+runs <- lapply(sessions, function(session_file) {
+  tibble(
+    session = session_file$session,
+    version = factor(
+      unname(version_labels[names(session_file$results)]),
+      levels = version_levels
+    ),
+    results = unname(session_file$results)
+  )
+}) |>
+  bind_rows()
+
+model_levels <- names(runs$results[[1]]$mcmc)
+# benchmark.R's section for each model
+model_sections <- paste0("mcmc-", gsub("_", "-", model_levels))
+
+# one row per run of mcmc(): its timed calls, the last call's draws, the
+# sampler iterations each draw cost, and what warmup tuned hmc() to
+mcmc_runs <- lapply(seq_len(nrow(runs)), function(i) {
+  results <- runs$results[[i]]
+  lapply(model_levels, function(model_name) {
+    run <- results$mcmc[[model_name]]
+    tibble(
+      session = runs$session[i],
+      version = runs$version[i],
+      model = model_name,
+      call_seconds = list(as.numeric(run$marks$time[[1]])),
+      draws = list(run$draws),
+      iterations_per_draw = results$sampler_iterations_per_draw,
+      epsilon = run$epsilon,
+      diag_sd = list(run$diag_sd)
+    )
+  }) |>
+    bind_rows()
+}) |>
+  bind_rows() |>
+  mutate(model = factor(model, levels = model_levels))
+
+# small dots for the sessions over a large faint dot for their mean
+gg_sessions <- function(data, means, measure, x_label) {
+  ggplot(data, aes(x = {{ measure }}, y = version, colour = version)) +
+    geom_point(data = means, size = 5, alpha = 0.25) +
+    geom_point(
+      position = position_jitter(width = 0, height = 0.2, seed = 2026),
+      size = 1.2
+    ) +
+    scale_colour_manual(values = colours, guide = "none") +
+    facet_wrap(vars(model), ncol = 2, scales = "free_x") +
+    labs(x = x_label, y = NULL)
+}
+session_caption <- "Each small dot is one session's run. The large faint dot behind them is the mean of the sessions."
+
+# what each "Run it yourself" block runs: setup, the iteration count, and every
+# model
+run_code <- run_it_yourself(
+  post_path,
+  "benchmark.R",
+  c("setup", "sampler-iterations", model_sections),
+  versions,
+  paste0(
+    "list(sampler_iterations_per_draw = sampler_iterations_per_draw, ",
+    paste0(model_levels, " = mcmc_", model_levels, collapse = ", "),
+    ")"
+  )
+)
+```
+
+```{r}
+#| label: efficiency
+#| code-summary: "The measures, and each version's mean"
+# posterior caps a bulk ESS at S × log10(S) for S draws, which anticorrelated
+# draws can reach, and warns each time. The warnings are counted here and
+# reported under Convergence
+ess_cap_warnings <- 0
+summarise_counting_caps <- function(draws) {
+  withCallingHandlers(
+    posterior::summarise_draws(draws, "mean", "rhat", "ess_bulk", "ess_tail"),
+    warning = function(w) {
+      if (grepl("The ESS has been capped", conditionMessage(w), fixed = TRUE)) {
+        ess_cap_warnings <<- ess_cap_warnings + 1
+        invokeRestart("muffleWarning")
+      }
+    }
+  )
+}
+
+# everything is from the run's last call, whose draws were kept
+efficiency <- mcmc_runs |>
+  mutate(
+    posterior = lapply(draws, summarise_counting_caps),
+    n_draws = vapply(draws, posterior::ndraws, numeric(1)),
+    seconds = vapply(
+      call_seconds,
+      \(times) times[[settings$mcmc_calls]],
+      numeric(1)
+    ),
+    smallest_ess_bulk = vapply(posterior, \(summary) min(summary$ess_bulk), numeric(1)),
+    smallest_ess_tail = vapply(posterior, \(summary) min(summary$ess_tail), numeric(1)),
+    largest_rhat = vapply(posterior, \(summary) max(summary$rhat), numeric(1)),
+    smallest_ess_capped = smallest_ess_bulk >=
+      n_draws * log10(n_draws) * (1 - 1e-9),
+    sampler_iterations = n_draws * iterations_per_draw,
+    ess_per_iteration = smallest_ess_bulk / sampler_iterations,
+    ess_per_second = smallest_ess_bulk / seconds
+  ) |>
+  select(-call_seconds, -draws, -diag_sd, -posterior)
+
+# each version's mean over the sessions, for each model
+efficiency_means <- efficiency |>
+  group_by(model, version) |>
+  summarise(
+    across(c(epsilon, ess_per_iteration, ess_per_second), mean),
+    .groups = "drop"
+  )
+
+# #855's mean over main's, for each model
+pr_over_main <- efficiency_means |>
+  pivot_longer(
+    c(epsilon, ess_per_iteration, ess_per_second),
+    names_to = "measure"
+  ) |>
+  pivot_wider(names_from = version, values_from = value) |>
+  mutate(ratio = `#855` / main)
+ratio_of <- function(measure_name, model_name) {
+  pr_over_main$ratio[
+    pr_over_main$measure == measure_name & pr_over_main$model == model_name
+  ]
+}
+
+# "#855 gives 1.4 times main's", for one measure and model
+compare_on <- function(measure_name, model_name) {
+  compare_rates(
+    ratio_of(measure_name, model_name),
+    version_text[["#855"]],
+    version_text[["main"]]
+  )
+}
+```
+
+[greta#855](https://github.com/greta-dev/greta/pull/855) runs `hmc()`'s warmup inside TensorFlow, and its warmup tunes the step size to different values from main's. This post runs `{r} version_ref("main")` and `{r} version_ref("#855")` with each version's defaults on four of greta's examples, in `{r} n_sessions` sessions, to see whether that changes how many effective samples `mcmc()` gives. Taking the smallest bulk ESS of each run, and each version's mean over the sessions, per sampler iteration (which leaves out how fast the code runs) and per second:
+
+- linear:
+    - per sampler iteration, `{r} compare_on("ess_per_iteration", "linear")`
+    - per second, `{r} compare_on("ess_per_second", "linear")`
+- multiple_linear:
+    - per sampler iteration, `{r} compare_on("ess_per_iteration", "multiple_linear")`
+    - per second, `{r} compare_on("ess_per_second", "multiple_linear")`
+- hierarchical_linear:
+    - per sampler iteration, `{r} compare_on("ess_per_iteration", "hierarchical_linear")`
+    - per second, `{r} compare_on("ess_per_second", "hierarchical_linear")`
+- eight_schools:
+    - per sampler iteration, `{r} compare_on("ess_per_iteration", "eight_schools")`
+    - per second, `{r} compare_on("ess_per_second", "eight_schools")`
+
+::: {.callout-note collapse="true"}
+## How it was tested
+
+**The versions.**
+
+- **`{r} version_ref("main")`**: `{r} I(version_link(versions[["main"]]))`. Each draw costs `thin + 1` sampler iterations, two at the default `thin = 1`, and each warmup step runs the same way, so its defaults of `warmup = 1000` and `n_samples = 1000` run 2000 iterations in each phase. It tunes `epsilon` and `diag_sd` in R between bursts of three warmup steps, and draws `hmc()`'s number of leapfrog steps once per burst.
+- **`{r} version_ref("#855")`**: `{r} I(version_link(versions[["#855"]]))`. Each draw and each warmup step is one sampler iteration, and its defaults of `warmup = 2000` and `n_samples = 2000` run the same 2000 iterations in each phase as main's. It tunes inside TensorFlow every three iterations, on the same schedule as main: `epsilon` by dual averaging [@hoffman2014] over the first 10% and last 60% of warmup, `diag_sd` between 10% and 40%. It draws the number of leapfrog steps afresh every iteration.
+
+**The models**, four of greta's examples. Normal and log-normal distributions are written with their mean and standard deviation, as greta's `normal()` and `lognormal()` take them; $\text{Cauchy}^{+}$ is a Cauchy truncated to positive values.
+
+::: panel-tabset
+
+#### linear
+
+Each department's rating in `attitude` regressed on its number of complaints.
+
+$$
+\begin{aligned}
+\text{rating}_i &\sim \text{Normal}(\mu_i, \sigma), \quad i = 1, \dots, 30 \\
+\mu_i &= \alpha + \beta \, \text{complaints}_i \\
+\alpha, \beta &\sim \text{Normal}(0, 10) \\
+\sigma &\sim \text{Cauchy}^{+}(0, 3)
+\end{aligned}
+$$
+
+```{r}
+#| label: mcmc-linear
+#| eval: false
+#| code-summary: "benchmark.R: mcmc-linear"
+```
+
+#### multiple_linear
+
+The same rating on all six of `attitude`'s other columns, $X$, through a matrix multiply.
+
+$$
+\begin{aligned}
+\text{rating}_i &\sim \text{Normal}(\mu_i, \sigma), \quad i = 1, \dots, 30 \\
+\mu_i &= \alpha + \sum_{j = 1}^{6} X_{ij} \, \beta_j \\
+\alpha, \beta_j &\sim \text{Normal}(0, 10) \\
+\sigma &\sim \text{Cauchy}^{+}(0, 3)
+\end{aligned}
+$$
+
+```{r}
+#| label: mcmc-multiple-linear
+#| eval: false
+#| code-summary: "benchmark.R: mcmc-multiple-linear"
+```
+
+#### hierarchical_linear
+
+Sepal length on sepal width in `iris`, with an offset for each species, $s[i]$ being flower $i$'s. Setosa's offset is zero and the other two share a scale, $\tau$.
+
+$$
+\begin{aligned}
+\text{Sepal.Length}_i &\sim \text{Normal}(\mu_i, \sigma), \quad i = 1, \dots, 150 \\
+\mu_i &= \alpha + \beta \, \text{Sepal.Width}_i + \gamma_{s[i]} \\
+\gamma_1 &= 0, \qquad \gamma_2, \gamma_3 \sim \text{Normal}(0, \tau) \\
+\tau &\sim \text{LogNormal}(0, 1) \\
+\alpha, \beta &\sim \text{Normal}(0, 10) \\
+\sigma &\sim \text{Cauchy}^{+}(0, 3)
+\end{aligned}
+$$
+
+```{r}
+#| label: mcmc-hierarchical-linear
+#| eval: false
+#| code-summary: "benchmark.R: mcmc-hierarchical-linear"
+```
+
+#### eight_schools
+
+The effect of coaching in eight schools, $y_j$, each measured with a known standard error, $\sigma_j$. The scale of the school effects, $\sigma_\eta$, is itself a parameter, which makes the posterior a funnel.
+
+$$
+\begin{aligned}
+y_j &\sim \text{Normal}(\theta_j, \sigma_j), \quad j = 1, \dots, 8 \\
+\theta_j &= \mu + \xi \, \eta_j \\
+\eta_j &\sim \text{Normal}(0, \sigma_\eta) \\
+\sigma_\eta &\sim \text{InverseGamma}(1, 1) \\
+\mu &\sim \text{Normal}(0, 100) \\
+\xi &\sim \text{Normal}(0, 5)
+\end{aligned}
+$$
+
+```{r}
+#| label: mcmc-eight-schools
+#| eval: false
+#| code-summary: "benchmark.R: mcmc-eight-schools"
+```
+
+:::
+
+**What was run.** In each session, each version ran `mcmc()` with `{r} settings$chains` chains, `verbose = FALSE`, the default sampler, `hmc()`, and its own default `warmup` and `n_samples` on each model, calling it `{r} settings$mcmc_calls` times on the model, the first call tracing it. Everything here is from the last call: its runtime, its draws, and the `epsilon` and `diag_sd` warmup tuned, read from the result (`time_mcmc()`, in the `{r} section_link("benchmark.R", "setup")` section).
+
+**What was measured.** The bulk effective sample size (ESS) [@vehtari2021] of each run's worst-mixing parameter, as @hoffman2014 report it:
+
+- per sampler iteration of the sampling phase: the draws, times the sampler iterations each draw costs, which the `{r} section_link("benchmark.R", "sampler-iterations")` section counts with a random walk. Both versions draw the number of leapfrog steps uniformly from 5 to 10, so this is in proportion to ESS per gradient evaluation. It is what the tuning gives, apart from how fast the code runs.
+- per second of the call, warmup included: the time-normalised ESS of @girolami2011, which is what a user gets.
+
+**The sessions.** `{r} file_link("run.R")` installed each version as its `{r} section_link("run.R", "run-versions")` section says, and ran `{r} file_link("benchmark.R")` for each in a fresh R session of its own, in `{r} n_sessions` sessions, the order rotating so that each version ran first equally often (its `{r} section_link("run.R", "run-sessions")` section). Each session gives each version one seed, `session_seed`. Every version ran on TensorFlow `{r} runs$results[[1]]$provenance$tensorflow_version`, TensorFlow Probability `{r} runs$results[[1]]$provenance$tfp_version` and reticulate `{r} runs$results[[1]]$provenance$reticulate_version`, on `{r} runs$results[[1]]$provenance$machine` with `{r} runs$results[[1]]$provenance$cores` cores.
+
+**The scripts in full.**
+
+```{r}
+#| label: run-script
+#| file: run.R
+#| eval: false
+#| code-summary: "run.R"
+```
+
+```{r}
+#| label: benchmark-script
+#| file: benchmark.R
+#| eval: false
+#| code-summary: "benchmark.R"
+```
+
+:::
+
+## Step size warmup tunes to {#step-size}
+
+`epsilon`, the step size `hmc()` takes after warmup, in each run. Each parameter's step is `epsilon` times its `diag_sd` over the sum of `diag_sd`, so `epsilon` is the sum of the parameters' steps.
+
+```{r}
+#| label: plot-epsilon
+#| fig-cap: !expr session_caption
+gg_sessions(efficiency, efficiency_means, epsilon, "epsilon")
+```
+
+`{r} timed_by(section_link, "benchmark.R", c("setup", model_sections), verb = "Tuned")`
+
+```{r}
+#| label: run-epsilon
+#| eval: false
+#| code-summary: "Run it yourself"
+#| code: !expr run_code
+```
+
+```{r}
+#| label: epsilon-words
+# "#855's is 1.2 to 1.5 times main's" over the models, naming the version
+# with the larger mean epsilon
+epsilon_ratios <- pr_over_main$ratio[pr_over_main$measure == "epsilon"]
+pr_epsilon <- paste0(version_text[["#855"]], "'s")
+main_epsilon <- paste0(version_text[["main"]], "'s")
+larger_epsilon <- if (all(epsilon_ratios >= 1)) {
+  paste(pr_epsilon, "is", format_range(epsilon_ratios), "times", main_epsilon)
+} else if (all(epsilon_ratios <= 1)) {
+  paste(main_epsilon, "is", format_range(1 / epsilon_ratios), "times", pr_epsilon)
+} else {
+  paste0(
+    "it varies: ",
+    pr_epsilon,
+    " is up to ",
+    format_number(max(epsilon_ratios)),
+    " times ",
+    main_epsilon,
+    ", and ",
+    main_epsilon,
+    " up to ",
+    format_number(max(1 / epsilon_ratios)),
+    " times ",
+    pr_epsilon
+  )
+}
+```
+
+Over the four models, `{r} I(larger_epsilon)`.
+
+<details><summary>Figure: each parameter's step</summary>
+
+```{r}
+#| label: plot-steps
+#| fig-height: 8
+steps <- mcmc_runs |>
+  mutate(
+    step = Map(
+      \(epsilon, diag_sd) epsilon * diag_sd / sum(diag_sd),
+      epsilon,
+      diag_sd
+    )
+  ) |>
+  select(session, version, model, step) |>
+  mutate(parameter = lapply(step, seq_along)) |>
+  unnest(c(step, parameter)) |>
+  # each version's dots a little above or below their parameter's line
+  mutate(row = parameter + ifelse(version == "main", 0.15, -0.15))
+
+ggplot(steps, aes(x = step, y = row, colour = version)) +
+  geom_point(size = 1, alpha = 0.6) +
+  scale_x_log10() +
+  scale_y_continuous(breaks = \(limits) seq(1, floor(limits[2]))) +
+  scale_colour_manual(values = colours) +
+  facet_wrap(vars(model), ncol = 2, scales = "free") +
+  labs(x = "Step (log scale)", y = "Free parameter", colour = NULL) +
+  theme(legend.position = "top")
+```
+
+Each dot is one session's run. The free parameters are numbered in the order greta keeps them, on the scale `hmc()` samples them on.
+
+</details>
+
+## Effective samples per sampler iteration {#per-iteration}
+
+The smallest bulk ESS of each run over the sampler iterations of its sampling phase: how well the tuned sampler mixes, apart from how fast the code runs.
+
+```{r}
+#| label: plot-ess-per-iteration
+#| fig-cap: !expr session_caption
+gg_sessions(
+  efficiency,
+  efficiency_means,
+  ess_per_iteration,
+  "Smallest bulk ESS per sampler iteration"
+)
+```
+
+`{r} timed_by(section_link, "benchmark.R", c("setup", "sampler-iterations", model_sections), verb = "Run")`
+
+```{r}
+#| label: run-ess-per-iteration
+#| eval: false
+#| code-summary: "Run it yourself"
+#| code: !expr run_code
+```
+
+On linear, `{r} compare_on("ess_per_iteration", "linear")`; on multiple_linear, `{r} compare_on("ess_per_iteration", "multiple_linear")`; on hierarchical_linear, `{r} compare_on("ess_per_iteration", "hierarchical_linear")`; and on eight_schools, `{r} compare_on("ess_per_iteration", "eight_schools")`.
+
+## Effective samples per second {#per-second}
+
+The smallest bulk ESS of each run per second of its last call, warmup included.
+
+```{r}
+#| label: plot-ess-per-second
+#| fig-cap: !expr session_caption
+gg_sessions(
+  efficiency,
+  efficiency_means,
+  ess_per_second,
+  "Smallest bulk ESS per second"
+)
+```
+
+`{r} timed_by(section_link, "benchmark.R", c("setup", model_sections))`
+
+```{r}
+#| label: run-ess-per-second
+#| eval: false
+#| code-summary: "Run it yourself"
+#| code: !expr run_code
+```
+
+On linear, `{r} compare_on("ess_per_second", "linear")`; on multiple_linear, `{r} compare_on("ess_per_second", "multiple_linear")`; on hierarchical_linear, `{r} compare_on("ess_per_second", "hierarchical_linear")`; and on eight_schools, `{r} compare_on("ess_per_second", "eight_schools")`.
+
+<details><summary>Table: each version's mean, and #855's over main's</summary>
+
+```{r}
+#| label: table-means
+dt_table(pr_over_main)
+```
+
+</details>
+
+## Does every run converge? {#convergence}
+
+The largest R-hat [@vehtari2021] of each run, over its parameters. Above 1.01, the chains have not mixed well enough for their ESS to be trusted.
+
+```{r}
+#| label: plot-rhat
+#| fig-cap: "Each small dot is one session's run. The dashed line is at 1.01."
+ggplot(efficiency, aes(x = largest_rhat, y = version, colour = version)) +
+  geom_vline(xintercept = 1.01, linetype = "dashed", colour = "grey50") +
+  geom_point(
+    position = position_jitter(width = 0, height = 0.2, seed = 2026),
+    size = 1.2
+  ) +
+  scale_colour_manual(values = colours, guide = "none") +
+  facet_wrap(vars(model), ncol = 2, scales = "free_x") +
+  labs(x = "Largest R-hat", y = NULL)
+```
+
+```{r}
+#| label: convergence
+# for each model and version, the median run's largest R-hat, the highest, and
+# how many runs are above 1.01
+convergence <- efficiency |>
+  group_by(model, version) |>
+  summarise(
+    `median largest R-hat` = median(largest_rhat),
+    `highest` = max(largest_rhat),
+    `runs above 1.01` = paste(sum(largest_rhat > 1.01), "of", n()),
+    .groups = "drop"
+  )
+capped <- efficiency |> filter(smallest_ess_capped)
+knitr::kable(convergence, digits = 3)
+```
+
+With `{r} settings$chains` chains of `{r} format_number(unique(efficiency$sampler_iterations) / settings$chains)` sampler iterations, the median run's largest R-hat is `{r} format_range(convergence[["median largest R-hat"]])` over the models and versions, and the highest is `{r} format_number(max(efficiency$largest_rhat))`, so one run's smallest ESS is a rough estimate. The posterior package capped `{r} ess_cap_warnings` ESS estimates at S × log10(S) for S draws, which anticorrelated draws reach, and `{r} nrow(capped)` runs had a capped estimate as their smallest bulk ESS.
+
+<details><summary>Table: every run</summary>
+
+```{r}
+#| label: table-efficiency
+efficiency |>
+  select(
+    session,
+    version,
+    model,
+    seconds,
+    epsilon,
+    smallest_ess_bulk,
+    smallest_ess_tail,
+    largest_rhat,
+    ess_per_iteration,
+    ess_per_second
+  ) |>
+  dt_table()
+```
+
+</details>
+
+## Session details
+
+```{r}
+#| label: session-info-of
+first_session <- runs |> filter(session == sessions[[1]]$session)
+session_info_of <- function(version) {
+  first_session$results[[match(version, first_session$version)]]$session_info
+}
+```
+
+<details><summary>`sessioninfo::session_info()` for main</summary>
+
+```{r}
+#| label: session-info-main
+session_info_of("main")
+```
+
+</details>
+
+<details><summary>`sessioninfo::session_info()` for #855</summary>
+
+```{r}
+#| label: session-info-pr
+session_info_of("#855")
+```
+
+</details>
+
+## References
