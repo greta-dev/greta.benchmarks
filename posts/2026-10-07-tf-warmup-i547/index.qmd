@@ -616,6 +616,34 @@ The draws are kept by `benchmark.R`'s `{r} section_link("benchmark.R", "mcmc-dra
 
 With each version's defaults, #855 gives `{r} ratio_range(ess_ratios, "CRAN", setting == setting_levels[2])` times CRAN's smallest bulk ESS per second, and `{r} ratio_range(ess_ratios, "#850", setting == setting_levels[2])` times #850's. With the same arguments, it gives `{r} ratio_range(ess_ratios, "CRAN", setting == setting_levels[1])` times CRAN's.
 
+```{r}
+#| label: thinning-fix
+# for each model, main's median second call and mean smallest bulk ESS over
+# #850's, with the same arguments
+thinning_ratios <- efficiency |>
+  filter(setting == setting_levels[1], version %in% c("main", "#850")) |>
+  group_by(model, version) |>
+  summarise(
+    seconds = median(seconds),
+    smallest_ess_bulk = mean(smallest_ess_bulk),
+    .groups = "drop_last"
+  ) |>
+  summarise(
+    seconds = seconds[version == "main"] / seconds[version == "#850"],
+    smallest_ess_bulk = smallest_ess_bulk[version == "main"] /
+      smallest_ess_bulk[version == "#850"]
+  ) |>
+  pivot_longer(-model, names_to = "measure", values_to = "main_over_850") |>
+  group_by(measure) |>
+  summarise(
+    version = "main",
+    lowest = min(main_over_850),
+    highest = max(main_over_850)
+  )
+```
+
+[#850 changes only main's thinning, its default `warmup` and `n_samples`, and its progress bar, which these runs hide, so with the same arguments the two show what the thinning fix alone does. Main runs twice the sampler iterations, warmup included, takes `{r} ratio_range(thinning_ratios, "main", measure == "seconds")` times as long as #850 for a second call, and gives `{r} ratio_range(thinning_ratios, "main", measure == "smallest_ess_bulk")` times its smallest bulk ESS.]{#thinning-fix}
+
 <details><summary>Table: every session</summary>
 
 ```{r}
